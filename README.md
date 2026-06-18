@@ -63,6 +63,7 @@ orbitnest gen types              # → orbitnest.types.ts
 | `orbitnest db push` | Apply every pending migration in order, inside a transaction each. |
 | `orbitnest db status` | Show which migrations are applied, pending, or modified-after-apply. |
 | `orbitnest db rollback [id]` | Roll back the latest applied migration (or a specific `id`) using its `-- migrate:down` section. |
+| `orbitnest db reset --yes` | **Destructive.** Drop every table in the project (internal `auth_*` tables are spared) and re-apply all migrations from scratch. Requires `--yes`. |
 | `orbitnest db sql "<SQL>"` | Run ad-hoc SQL against the linked project. `--file <path>` runs a file. |
 | `orbitnest gen types` | Introspect the schema and emit TypeScript interfaces + a `Database` map. `--out <file>` (default `orbitnest.types.ts`) or `--stdout`. |
 

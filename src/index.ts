@@ -235,6 +235,21 @@ async function cmdDbRollback(positionals: string[], flags: Record<string, string
   success(`Rolled back migration ${color.bold(rolled)}.`);
 }
 
+async function cmdDbReset(flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const dir = str(flags, 'dir') || 'migrations';
+  if (!flags.yes && !flags.force) {
+    fail('`db reset` DROPS every table in your project and re-runs all migrations. Re-run with --yes to confirm.');
+  }
+  warn('Resetting database — dropping all tables and re-applying migrations…');
+  const res = await mig.reset(sqlRunner(api, id), dir);
+  success(
+    `Dropped ${res.dropped.length} table(s); applied ${res.ran.length} migration(s).` +
+      (res.dropped.length ? color.dim(`\n  dropped: ${res.dropped.join(', ')}`) : ''),
+  );
+}
+
 async function cmdDbSql(positionals: string[], flags: Record<string, string | boolean>) {
   const api = authed();
   const { id } = await resolveProjectId(api, str(flags, 'project'));
@@ -277,6 +292,7 @@ ${color.bold('Database & migrations')}
   db push               Apply pending migrations
   db status             Show migration status
   db rollback [id]      Roll back the latest migration (or a specific one)
+  db reset --yes        Drop all tables and re-apply every migration (destructive)
   db sql "<SQL>"        Run SQL against the linked project (--file <path>)
   gen types             Generate TypeScript types from the schema (--out, --stdout)
 
@@ -314,8 +330,9 @@ async function main() {
         case 'push': return cmdDbPush(flags);
         case 'status': return cmdDbStatus(flags);
         case 'rollback': return cmdDbRollback(rest.slice(1), flags);
+        case 'reset': return cmdDbReset(flags);
         case 'sql': return cmdDbSql(rest.slice(1), flags);
-        default: return fail('Usage: orbitnest db <push|status|rollback|sql>');
+        default: return fail('Usage: orbitnest db <push|status|rollback|reset|sql>');
       }
     case 'gen':
       if (rest[0] === 'types') return cmdGenTypes(flags);

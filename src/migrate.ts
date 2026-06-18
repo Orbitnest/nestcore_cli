@@ -155,6 +155,32 @@ export async function rollback(sql: Sql, dir: string, id?: string): Promise<stri
   return target.id;
 }
 
+/**
+ * Drop all user tables in the public schema (leaving internal `auth_*`, `pg_*`,
+ * and `_*` tables untouched), then re-apply every migration from scratch.
+ * Destructive — the caller must confirm first.
+ */
+export async function reset(sql: Sql, dir: string): Promise<{ dropped: string[]; ran: string[] }> {
+  const { rows } = await sql(
+    `SELECT tablename FROM pg_tables
+      WHERE schemaname = 'public'
+        AND tablename NOT LIKE 'auth\\_%'
+        AND tablename NOT LIKE 'pg\\_%'
+        AND tablename NOT LIKE '\\_%'
+      ORDER BY tablename`,
+  );
+  const dropped: string[] = [];
+  for (const r of rows) {
+    const t = r.tablename as string;
+    if (!t || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(t)) continue;
+    await sql(`DROP TABLE IF EXISTS "${t}" CASCADE`);
+    dropped.push(t);
+  }
+  // `push` recreates the (now-dropped) migrations registry and runs everything.
+  const { ran } = await push(sql, dir);
+  return { dropped, ran };
+}
+
 export function createMigration(dir: string, name: string): { id: string; path: string } {
   mkdirSync(dir, { recursive: true });
   let existing: string[] = [];
