@@ -65,7 +65,19 @@ orbitnest gen types              # → orbitnest.types.ts
 | `orbitnest db rollback [id]` | Roll back the latest applied migration (or a specific `id`) using its `-- migrate:down` section. |
 | `orbitnest db reset --yes` | **Destructive.** Drop every table in the project (internal `auth_*` tables are spared) and re-apply all migrations from scratch. Requires `--yes`. |
 | `orbitnest db sql "<SQL>"` | Run ad-hoc SQL against the linked project. `--file <path>` runs a file. |
+| `orbitnest db connect` | Print the direct Postgres connection string (when the deployment has direct connections enabled). |
 | `orbitnest gen types` | Introspect the schema and emit TypeScript interfaces + a `Database` map. `--out <file>` (default `orbitnest.types.ts`) or `--stdout`. |
+
+### Integrations
+
+| Command | Description |
+| --- | --- |
+| `orbitnest webhooks list` | List the project's webhooks. |
+| `orbitnest webhooks create --url <u> [--events INSERT,UPDATE,DELETE] [--table <t>] [--name <n>]` | Create a webhook (prints the signing secret once). |
+| `orbitnest webhooks delete <id>` / `test <id>` | Remove a webhook / send it a test event. |
+| `orbitnest sms get` | Show the project's Twilio/SMS config. |
+| `orbitnest sms set [--sid <s>] [--token <t>] [--from <n>] [--enable\|--disable]` | Configure Twilio (auth token stored encrypted). |
+| `orbitnest sms test <phone>` | Send a test SMS. |
 
 ### Options
 

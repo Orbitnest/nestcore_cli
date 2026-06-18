@@ -271,6 +271,117 @@ async function cmdGenTypes(flags: Record<string, string | boolean>) {
   success(`Wrote TypeScript types → ${color.bold(out)}`);
 }
 
+async function cmdDbConnect(flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  let res: any;
+  try {
+    res = await api.get<any>(`/admin/projects/${encodeURIComponent(id)}/connection`);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 403) {
+      fail('Direct database connections are not enabled for this deployment.');
+    }
+    throw e;
+  }
+  const c = res?.data ?? res;
+  heading('Direct Postgres connection');
+  log(c.connection_string);
+  log('');
+  table(
+    [
+      { field: 'host', value: String(c.host) },
+      { field: 'port', value: String(c.port) },
+      { field: 'database', value: String(c.database) },
+      { field: 'user', value: String(c.user) },
+      { field: 'sslmode', value: String(c.sslmode ?? '') },
+    ],
+    ['field', 'value'],
+  );
+  if (c.pooler) {
+    log(color.dim('\nPooled (transaction mode):'));
+    log(c.pooler.connection_string);
+  }
+  if (c.warning) warn(c.warning);
+}
+
+async function cmdWebhooks(rest: string[], flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const base = `/admin/projects/${encodeURIComponent(id)}/webhooks`;
+  const sub = rest[0] ?? 'list';
+  if (sub === 'list') {
+    const hooks = listFrom(await api.get<any>(base));
+    heading(`Webhooks (${hooks.length})`);
+    table(
+      hooks.map((h) => ({
+        id: String(h.id),
+        name: String(h.name ?? ''),
+        url: String(h.url ?? ''),
+        events: (h.events ?? []).join('/'),
+        active: h.is_active ? 'yes' : 'no',
+      })),
+      ['id', 'name', 'url', 'events', 'active'],
+    );
+  } else if (sub === 'create') {
+    const url = str(flags, 'url');
+    if (!url) fail('Usage: orbitnest webhooks create --url <url> [--name <n>] [--events INSERT,UPDATE,DELETE] [--table <t>]');
+    const events = (str(flags, 'events') || 'INSERT,UPDATE,DELETE').split(',').map((s) => s.trim().toUpperCase());
+    const res = await api.post<any>(base, { name: str(flags, 'name') || 'webhook', url, events, table_name: str(flags, 'table') || null });
+    const d = res?.data ?? res;
+    success(`Created webhook ${color.bold(d.id)}`);
+    if (d.secret) log(`  signing secret (shown once): ${color.bold(d.secret)}`);
+  } else if (sub === 'delete') {
+    if (!rest[1]) fail('Usage: orbitnest webhooks delete <id>');
+    await api.del(`${base}/${encodeURIComponent(rest[1])}`);
+    success('Webhook deleted.');
+  } else if (sub === 'test') {
+    if (!rest[1]) fail('Usage: orbitnest webhooks test <id>');
+    const res = await api.post<any>(`${base}/${encodeURIComponent(rest[1])}/test`);
+    const d = res?.data ?? res;
+    if (d.success) success(`Test delivered (HTTP ${d.status_code}).`);
+    else fail(`Test failed: ${d.error || `HTTP ${d.status_code}`}`);
+  } else {
+    fail('Usage: orbitnest webhooks <list|create|delete|test>');
+  }
+}
+
+async function cmdSms(rest: string[], flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const base = `/admin/projects/${encodeURIComponent(id)}/sms-config`;
+  const sub = rest[0] ?? 'get';
+  if (sub === 'get') {
+    const res = await api.get<any>(base);
+    const c = res?.data ?? res;
+    heading('SMS / Twilio config');
+    table(
+      [
+        { field: 'account_sid', value: String(c.account_sid ?? '—') },
+        { field: 'from_number', value: String(c.from_number ?? '—') },
+        { field: 'enabled', value: c.is_enabled ? 'yes' : 'no' },
+        { field: 'auth_token', value: c.has_auth_token ? 'set' : 'unset' },
+      ],
+      ['field', 'value'],
+    );
+  } else if (sub === 'set') {
+    const body: Record<string, unknown> = {};
+    if (str(flags, 'sid') !== undefined) body.account_sid = str(flags, 'sid');
+    if (str(flags, 'token') !== undefined) body.auth_token = str(flags, 'token');
+    if (str(flags, 'from') !== undefined) body.from_number = str(flags, 'from');
+    if (flags.enable) body.is_enabled = true;
+    if (flags.disable) body.is_enabled = false;
+    if (Object.keys(body).length === 0) fail('Nothing to set. Use --sid --token --from --enable/--disable.');
+    await api.put(base, body);
+    success('SMS config saved.');
+  } else if (sub === 'test') {
+    if (!rest[1]) fail('Usage: orbitnest sms test <phone>');
+    await api.post(`${base}/test`, { to: rest[1] });
+    success(`Test SMS sent to ${rest[1]}.`);
+  } else {
+    fail('Usage: orbitnest sms <get|set|test>');
+  }
+}
+
 // ── help ─────────────────────────────────────────────────────────────────────
 function printHelp() {
   log(`${color.bold('orbitnest')} ${color.dim('v' + VERSION)} — OrbitNest platform CLI
@@ -294,7 +405,16 @@ ${color.bold('Database & migrations')}
   db rollback [id]      Roll back the latest migration (or a specific one)
   db reset --yes        Drop all tables and re-apply every migration (destructive)
   db sql "<SQL>"        Run SQL against the linked project (--file <path>)
+  db connect            Show the direct Postgres connection string (if enabled)
   gen types             Generate TypeScript types from the schema (--out, --stdout)
+
+${color.bold('Integrations')}
+  webhooks list                         List webhooks
+  webhooks create --url <u> [--events] [--table] [--name]
+  webhooks delete <id> | test <id>      Remove / send a test event
+  sms get                               Show the project's Twilio config
+  sms set [--sid][--token][--from][--enable|--disable]
+  sms test <phone>                      Send a test SMS
 
 ${color.bold('Options')}
   -p, --project <id>    Target project (overrides the linked one)
@@ -332,8 +452,11 @@ async function main() {
         case 'rollback': return cmdDbRollback(rest.slice(1), flags);
         case 'reset': return cmdDbReset(flags);
         case 'sql': return cmdDbSql(rest.slice(1), flags);
-        default: return fail('Usage: orbitnest db <push|status|rollback|reset|sql>');
+        case 'connect': return cmdDbConnect(flags);
+        default: return fail('Usage: orbitnest db <push|status|rollback|reset|sql|connect>');
       }
+    case 'webhooks': return cmdWebhooks(rest, flags);
+    case 'sms': return cmdSms(rest, flags);
     case 'gen':
       if (rest[0] === 'types') return cmdGenTypes(flags);
       return fail('Usage: orbitnest gen types');
