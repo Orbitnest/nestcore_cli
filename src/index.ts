@@ -1,0 +1,340 @@
+import { readFileSync, writeFileSync } from 'fs';
+import * as readline from 'readline';
+import {
+  Api,
+  ApiError,
+  apiUrl,
+  authed,
+  jwtExpiry,
+  loadCredentials,
+  loadLink,
+  resolveProjectId,
+  saveCredentials,
+  saveLink,
+} from './context';
+import type { Sql } from './migrate';
+import * as mig from './migrate';
+import { generateTypes } from './typegen';
+import { color, ExitSignal, fail, heading, info, log, success, table, warn } from './ui';
+
+const VERSION = '0.1.0';
+
+// ── arg parsing ──────────────────────────────────────────────────────────────
+const ALIAS: Record<string, string> = {
+  o: 'out', f: 'file', p: 'project', d: 'dir', h: 'help', v: 'version', e: 'email',
+};
+
+function parseArgs(argv: string[]): { positionals: string[]; flags: Record<string, string | boolean> } {
+  const positionals: string[] = [];
+  const flags: Record<string, string | boolean> = {};
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (tok.startsWith('--')) {
+      const body = tok.slice(2);
+      if (body.includes('=')) {
+        const [k, ...v] = body.split('=');
+        flags[k] = v.join('=');
+      } else if (i + 1 < argv.length && !argv[i + 1].startsWith('-')) {
+        flags[body] = argv[++i];
+      } else flags[body] = true;
+    } else if (tok.startsWith('-') && tok.length > 1) {
+      const k = ALIAS[tok.slice(1)] ?? tok.slice(1);
+      if (i + 1 < argv.length && !argv[i + 1].startsWith('-')) flags[k] = argv[++i];
+      else flags[k] = true;
+    } else positionals.push(tok);
+  }
+  return { positionals, flags };
+}
+
+const str = (flags: Record<string, string | boolean>, k: string): string | undefined =>
+  typeof flags[k] === 'string' ? (flags[k] as string) : undefined;
+
+// ── prompts ──────────────────────────────────────────────────────────────────
+function promptLine(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (a) => { rl.close(); resolve(a.trim()); });
+  });
+}
+
+function promptSecret(question: string): Promise<string> {
+  if (!process.stdin.isTTY) {
+    fail('Cannot prompt for a password without a TTY. Use --password or ORBITNEST_PASSWORD.');
+  }
+  return new Promise((resolve, reject) => {
+    process.stdout.write(question);
+    const stdin = process.stdin;
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+    let value = '';
+    const onData = (ch: string) => {
+      const code = ch.charCodeAt(0);
+      if (code === 13 || code === 10 || code === 4) {
+        // Enter / Ctrl-D — submit
+        stdin.setRawMode(false);
+        stdin.pause();
+        stdin.removeListener('data', onData);
+        process.stdout.write(String.fromCharCode(10));
+        resolve(value);
+      } else if (code === 3) {
+        // Ctrl-C — abort
+        stdin.setRawMode(false);
+        stdin.pause();
+        stdin.removeListener('data', onData);
+        process.stdout.write(String.fromCharCode(10));
+        reject(new ExitSignal(1));
+      } else if (code === 127 || code === 8) {
+        // Backspace / DEL
+        value = value.slice(0, -1);
+      } else {
+        value += ch;
+      }
+    };
+    stdin.on('data', onData);
+  });
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+function sqlRunner(api: Api, projectId: string): Sql {
+  return async (sql, params) => {
+    const r = await api.post<any>(
+      `/projects/${encodeURIComponent(projectId)}/database/sql`,
+      params && params.length ? { sql, params } : { sql },
+    );
+    const rows = Array.isArray(r?.data) ? r.data : (r?.data?.rows ?? r?.rows ?? []);
+    return { rows };
+  };
+}
+
+function listFrom(res: any): any[] {
+  if (Array.isArray(res)) return res;
+  if (Array.isArray(res?.data)) return res.data;
+  if (Array.isArray(res?.projects)) return res.projects;
+  return [];
+}
+
+// ── commands ─────────────────────────────────────────────────────────────────
+async function cmdLogin(flags: Record<string, string | boolean>) {
+  const url = str(flags, 'url') || apiUrl();
+  const email = str(flags, 'email') || process.env.ORBITNEST_EMAIL || (await promptLine('Email: '));
+  const password = str(flags, 'password') || process.env.ORBITNEST_PASSWORD || (await promptSecret('Password: '));
+  if (!email || !password) fail('Email and password are required.');
+
+  const api = new Api(url);
+  let res: any;
+  try {
+    res = await api.post<any>('/auth/signin', { email, password }, { noAuth: true });
+  } catch (e) {
+    fail(`Login failed: ${(e as ApiError).message}`);
+  }
+  const access = res.access_token ?? res.data?.access_token;
+  const refresh = res.refresh_token ?? res.data?.refresh_token;
+  const user = res.user ?? res.data?.user;
+  if (!access) fail('Login succeeded but no access token was returned by the server.');
+  saveCredentials({ apiUrl: url, access_token: access, refresh_token: refresh, expires_at: jwtExpiry(access), user });
+  success(`Logged in as ${color.bold(user?.email ?? email)} (${url})`);
+}
+
+async function cmdLogout() {
+  const creds = loadCredentials();
+  if (creds.refresh_token) {
+    await new Api(apiUrl(), creds.access_token)
+      .post('/auth/signout', { refresh_token: creds.refresh_token })
+      .catch(() => undefined);
+  }
+  saveCredentials({ apiUrl: creds.apiUrl });
+  success('Logged out.');
+}
+
+async function cmdWhoami() {
+  const creds = loadCredentials();
+  if (!creds.access_token) { warn('Not logged in. Run `orbitnest login`.'); return; }
+  try {
+    const me = await authed().get<any>('/auth/profile');
+    const u = me.user ?? me.data ?? me;
+    success(`Logged in as ${color.bold(u.email ?? creds.user?.email ?? 'unknown')}`);
+    log(color.dim(`  API: ${apiUrl()}`));
+    if (creds.expires_at) log(color.dim(`  token expires: ${creds.expires_at}`));
+  } catch (e) {
+    warn(`Session check failed (${(e as ApiError).message}). Try \`orbitnest login\`.`);
+  }
+}
+
+async function cmdProjects() {
+  const projects = listFrom(await authed().get<any>('/projects'));
+  heading(`Projects (${projects.length})`);
+  table(
+    projects.map((p) => ({ name: String(p.name ?? ''), slug: String(p.slug ?? ''), id: String(p.id ?? '') })),
+    ['name', 'slug', 'id'],
+  );
+}
+
+async function cmdLink(positionals: string[]) {
+  const ref = positionals[0];
+  const projects = listFrom(await authed().get<any>('/projects'));
+  if (!ref) {
+    if (projects.length === 1) {
+      const p = projects[0];
+      saveLink({ projectId: p.id, slug: p.slug, name: p.name, apiUrl: apiUrl() });
+      success(`Linked to ${color.bold(p.name)} (${p.slug}).`);
+      return;
+    }
+    heading('Specify a project to link: `orbitnest link <id|slug>`');
+    table(projects.map((p) => ({ name: String(p.name ?? ''), slug: String(p.slug ?? '') })), ['name', 'slug']);
+    return;
+  }
+  const match =
+    projects.find((p) => p.id === ref || p.slug === ref) ??
+    projects.find((p) => String(p.name).toLowerCase() === ref.toLowerCase());
+  if (!match) fail(`No project matching "${ref}". Run \`orbitnest projects\` to see them.`);
+  saveLink({ projectId: match.id, slug: match.slug, name: match.name, apiUrl: apiUrl() });
+  success(`Linked this directory to ${color.bold(match.name)} (${match.slug}).`);
+  log(color.dim('  Wrote .orbitnest/config.json'));
+}
+
+function cmdMigrationNew(positionals: string[], flags: Record<string, string | boolean>) {
+  const name = positionals.join(' ').trim();
+  if (!name) fail('Usage: orbitnest migration new <name>');
+  const dir = str(flags, 'dir') || 'migrations';
+  const { id, path } = mig.createMigration(dir, name);
+  success(`Created migration ${color.bold(id)}: ${path}`);
+}
+
+async function cmdDbPush(flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const dir = str(flags, 'dir') || 'migrations';
+  const sql = sqlRunner(api, id);
+  const res = await mig.push(sql, dir);
+  if (res.ran.length === 0) success(`Up to date — ${res.skipped.length} migration(s) already applied.`);
+  else success(`Applied ${res.ran.length} migration(s): ${res.ran.join(', ')}${res.skipped.length ? color.dim(` (skipped ${res.skipped.length})`) : ''}`);
+}
+
+async function cmdDbStatus(flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const dir = str(flags, 'dir') || 'migrations';
+  const entries = await mig.status(sqlRunner(api, id), dir);
+  heading(`Migrations (${entries.filter((e) => e.applied).length}/${entries.length} applied)`);
+  table(
+    entries.map((e) => ({
+      id: e.id,
+      name: e.name,
+      status: e.mismatch ? color.red('modified') : e.applied ? color.green('applied') : color.dim('pending'),
+    })),
+    ['id', 'name', 'status'],
+  );
+}
+
+async function cmdDbRollback(positionals: string[], flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const dir = str(flags, 'dir') || 'migrations';
+  const rolled = await mig.rollback(sqlRunner(api, id), dir, positionals[0]);
+  success(`Rolled back migration ${color.bold(rolled)}.`);
+}
+
+async function cmdDbSql(positionals: string[], flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const file = str(flags, 'file');
+  const sqlText = file ? readFileSync(file, 'utf8') : positionals.join(' ');
+  if (!sqlText.trim()) fail('Usage: orbitnest db sql "<SQL>"  (or --file <path>)');
+  const { rows } = await sqlRunner(api, id)(sqlText);
+  log(JSON.stringify(rows, null, 2));
+  log(color.dim(`\n${rows.length} row(s)`));
+}
+
+async function cmdGenTypes(flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const ts = await generateTypes(sqlRunner(api, id));
+  if (flags.stdout) { process.stdout.write(ts); return; }
+  const out = str(flags, 'out') || 'orbitnest.types.ts';
+  writeFileSync(out, ts);
+  success(`Wrote TypeScript types → ${color.bold(out)}`);
+}
+
+// ── help ─────────────────────────────────────────────────────────────────────
+function printHelp() {
+  log(`${color.bold('orbitnest')} ${color.dim('v' + VERSION)} — OrbitNest platform CLI
+
+${color.bold('Usage')}
+  orbitnest <command> [options]
+
+${color.bold('Auth')}
+  login                 Sign in (--email, --password, or env / interactive)
+  logout                Sign out and clear the local session
+  whoami                Show the current session
+
+${color.bold('Projects')}
+  projects              List your projects
+  link <id|slug>        Link the current directory to a project (.orbitnest/config.json)
+
+${color.bold('Database & migrations')}
+  migration new <name>  Scaffold a new migration file (NNN_name.sql)
+  db push               Apply pending migrations
+  db status             Show migration status
+  db rollback [id]      Roll back the latest migration (or a specific one)
+  db sql "<SQL>"        Run SQL against the linked project (--file <path>)
+  gen types             Generate TypeScript types from the schema (--out, --stdout)
+
+${color.bold('Options')}
+  -p, --project <id>    Target project (overrides the linked one)
+  -d, --dir <path>      Migrations directory (default: migrations)
+  -o, --out <file>      Output file for gen types
+      --url <url>       API base URL for login (default: https://api.orbitnest.io)
+  -h, --help            Show help
+  -v, --version         Show version
+
+${color.dim('Migrations run DDL via the admin SQL endpoint. Files may include a')}
+${color.dim('`-- migrate:down` section for rollback.')}`);
+}
+
+// ── main ─────────────────────────────────────────────────────────────────────
+async function main() {
+  const { positionals, flags } = parseArgs(process.argv.slice(2));
+  if (flags.version) { log(VERSION); return; }
+  const cmd = positionals[0];
+  if (!cmd || flags.help || cmd === 'help') { printHelp(); return; }
+
+  const rest = positionals.slice(1);
+  switch (cmd) {
+    case 'login': return cmdLogin(flags);
+    case 'logout': return cmdLogout();
+    case 'whoami': return cmdWhoami();
+    case 'projects': return cmdProjects();
+    case 'link': return cmdLink(rest);
+    case 'migration':
+      if (rest[0] === 'new') return cmdMigrationNew(rest.slice(1), flags);
+      return fail('Usage: orbitnest migration new <name>');
+    case 'db':
+      switch (rest[0]) {
+        case 'push': return cmdDbPush(flags);
+        case 'status': return cmdDbStatus(flags);
+        case 'rollback': return cmdDbRollback(rest.slice(1), flags);
+        case 'sql': return cmdDbSql(rest.slice(1), flags);
+        default: return fail('Usage: orbitnest db <push|status|rollback|sql>');
+      }
+    case 'gen':
+      if (rest[0] === 'types') return cmdGenTypes(flags);
+      return fail('Usage: orbitnest gen types');
+    default:
+      fail(`Unknown command "${cmd}". Run \`orbitnest --help\`.`);
+  }
+}
+
+main().catch((e) => {
+  // Set the exit code and let the event loop drain naturally — a hard
+  // process.exit() races with closing libuv handles and asserts on Windows.
+  if (e instanceof ExitSignal) {
+    process.exitCode = e.code; // message was already printed by fail()
+  } else if (e instanceof ApiError && e.status === 401) {
+    console.error(`${color.red('✗')} Unauthorized — your session may have expired. Run \`orbitnest login\`.`);
+    process.exitCode = 1;
+  } else {
+    console.error(`${color.red('✗')} ${e instanceof Error ? e.message : String(e)}`);
+    process.exitCode = 1;
+  }
+});

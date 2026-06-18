@@ -1,0 +1,37 @@
+{
+  "name": "@orbitnest/cli",
+  "version": "0.1.0",
+  "description": "Command-line interface for the OrbitNest platform — auth, projects, migrations, type generation, and SQL.",
+  "bin": {
+    "orbitnest": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "orbitnest",
+    "cli",
+    "backend-as-a-service",
+    "migrations"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Orbitnest/orbitnest_cli"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  }
+}
