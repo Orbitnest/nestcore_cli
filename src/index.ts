@@ -128,6 +128,31 @@ async function cmdLogin(flags: Record<string, string | boolean>) {
   } catch (e) {
     fail(`Login failed: ${(e as ApiError).message}`);
   }
+
+  // MFA step-up: when the admin has two-factor enabled, signin returns a
+  // short-lived challenge instead of tokens. Complete it with a TOTP code (or a
+  // recovery code) via POST /auth/signin/mfa.
+  if (res?.mfa_required ?? res?.data?.mfa_required) {
+    const challengeToken = res.challenge_token ?? res.data?.challenge_token;
+    let code = str(flags, 'code') || process.env.ORBITNEST_MFA_CODE;
+    if (!code) {
+      if (!process.stdin.isTTY) {
+        fail('This account has two-factor enabled. Pass --code <code> or set ORBITNEST_MFA_CODE.');
+      }
+      code = await promptLine('Two-factor code (authenticator or recovery code): ');
+    }
+    if (!code) fail('A two-factor code is required to finish signing in.');
+    try {
+      res = await api.post<any>(
+        '/auth/signin/mfa',
+        { challenge_token: challengeToken, code: code.trim() },
+        { noAuth: true },
+      );
+    } catch (e) {
+      fail(`Two-factor verification failed: ${(e as ApiError).message}`);
+    }
+  }
+
   const access = res.access_token ?? res.data?.access_token;
   const refresh = res.refresh_token ?? res.data?.refresh_token;
   const user = res.user ?? res.data?.user;
@@ -390,7 +415,7 @@ ${color.bold('Usage')}
   orbitnest <command> [options]
 
 ${color.bold('Auth')}
-  login                 Sign in (--email, --password, or env / interactive)
+  login                 Sign in (--email, --password, --code, or env / interactive)
   logout                Sign out and clear the local session
   whoami                Show the current session
 
@@ -421,6 +446,7 @@ ${color.bold('Options')}
   -d, --dir <path>      Migrations directory (default: migrations)
   -o, --out <file>      Output file for gen types
       --url <url>       API base URL for login (default: https://api.orbitnest.io)
+      --code <code>     Two-factor code for login (or env ORBITNEST_MFA_CODE)
   -h, --help            Show help
   -v, --version         Show version
 
