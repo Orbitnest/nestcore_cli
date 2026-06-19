@@ -15,6 +15,15 @@ import {
 import type { Sql } from './migrate';
 import * as mig from './migrate';
 import { generateTypes } from './typegen';
+import {
+  introspectSchema,
+  loadSnapshot,
+  saveSnapshot,
+  diffSnapshots,
+  hasChanges,
+  describeColumn,
+  SNAPSHOT_PATH,
+} from './schema-diff';
 import { color, ExitSignal, fail, heading, info, log, success, table, warn } from './ui';
 
 const VERSION = '0.1.0';
@@ -296,6 +305,47 @@ async function cmdGenTypes(flags: Record<string, string | boolean>) {
   success(`Wrote TypeScript types → ${color.bold(out)}`);
 }
 
+async function cmdDbDiff(flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const current = await introspectSchema(sqlRunner(api, id));
+
+  // `--save` captures the live schema as the new baseline.
+  if (flags.save) {
+    const path = saveSnapshot(current);
+    success(`Saved schema snapshot (${Object.keys(current.tables).length} table(s)) → ${color.bold(path)}`);
+    return;
+  }
+
+  const base = loadSnapshot();
+  if (!base) {
+    fail(`No schema snapshot found (${SNAPSHOT_PATH}). Run \`orbitnest db diff --save\` to capture the current schema as a baseline.`);
+  }
+
+  const diff = diffSnapshots(base!, current);
+  if (!hasChanges(diff)) {
+    success('No schema drift — the live schema matches the snapshot.');
+    return;
+  }
+
+  heading('Schema drift vs snapshot');
+  for (const t of diff.addedTables) log(color.green(`+ table ${t}`));
+  for (const t of diff.removedTables) log(color.red(`- table ${t}`));
+  for (const ct of diff.changedTables) {
+    log(color.yellow(`~ table ${ct.table}`));
+    for (const c of ct.addedColumns) {
+      log(color.green(`    + ${c}  ${color.dim(describeColumn(current.tables[ct.table].columns[c]))}`));
+    }
+    for (const c of ct.removedColumns) log(color.red(`    - ${c}`));
+    for (const cc of ct.changedColumns) {
+      log(color.yellow(`    ~ ${cc.column}: ${color.dim(describeColumn(cc.before))} → ${color.dim(describeColumn(cc.after))}`));
+    }
+  }
+  log(color.dim('\nUpdate the baseline with `orbitnest db diff --save`.'));
+  // Non-zero exit so CI can gate on drift (like `git diff --exit-code`).
+  process.exitCode = 1;
+}
+
 async function cmdDbConnect(flags: Record<string, string | boolean>) {
   const api = authed();
   const { id } = await resolveProjectId(api, str(flags, 'project'));
@@ -431,6 +481,7 @@ ${color.bold('Database & migrations')}
   db reset --yes        Drop all tables and re-apply every migration (destructive)
   db sql "<SQL>"        Run SQL against the linked project (--file <path>)
   db connect            Show the direct Postgres connection string (if enabled)
+  db diff               Show schema drift vs the saved snapshot (--save to update it)
   gen types             Generate TypeScript types from the schema (--out, --stdout)
 
 ${color.bold('Integrations')}
@@ -479,7 +530,8 @@ async function main() {
         case 'reset': return cmdDbReset(flags);
         case 'sql': return cmdDbSql(rest.slice(1), flags);
         case 'connect': return cmdDbConnect(flags);
-        default: return fail('Usage: orbitnest db <push|status|rollback|reset|sql|connect>');
+        case 'diff': return cmdDbDiff(flags);
+        default: return fail('Usage: orbitnest db <push|status|rollback|reset|sql|connect|diff>');
       }
     case 'webhooks': return cmdWebhooks(rest, flags);
     case 'sms': return cmdSms(rest, flags);
