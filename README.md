@@ -61,12 +61,12 @@ orbitnest gen types              # → orbitnest.types.ts
 | --- | --- |
 | `orbitnest migration new <name>` | Scaffold `migrations/NNN_<name>.sql` with `up` / `-- migrate:down` sections. |
 | `orbitnest db push` | Apply every pending migration in order, inside a transaction each. |
-| `orbitnest db status` | Show which migrations are applied, pending, or modified-after-apply. |
+| `orbitnest db status` | Show which migrations are applied, pending, failed, or modified-after-apply. |
 | `orbitnest db rollback [id]` | Roll back the latest applied migration (or a specific `id`) using its `-- migrate:down` section. |
-| `orbitnest db reset --yes` | **Destructive.** Drop every table in the project (internal `auth_*` tables are spared) and re-apply all migrations from scratch. Requires `--yes`. |
+| `orbitnest db reset --yes` | **Destructive.** Drop every table in the project (internal `auth_*` tables are spared) and re-apply all migrations from scratch. Requires `--yes`. First dry-runs the drop + every migration in a rolled-back transaction; if that fails, nothing is dropped. |
 | `orbitnest db sql "<SQL>"` | Run ad-hoc SQL against the linked project. `--file <path>` runs a file. |
 | `orbitnest db connect` | Print the direct Postgres connection string (when the deployment has direct connections enabled). |
-| `orbitnest gen types` | Introspect the schema and emit TypeScript interfaces + a `Database` map. `--out <file>` (default `orbitnest.types.ts`) or `--stdout`. |
+| `orbitnest gen types` | Introspect the schema and emit TypeScript interfaces + a `Database` map (`bigint`/`numeric` and enums are typed `string`, `json`/`jsonb` `unknown` — matching what the API returns). `--out <file>` (default `orbitnest.types.ts`) or `--stdout`. |
 
 ### Integrations
 
@@ -150,12 +150,16 @@ Re-run it after every schema change and commit the output, or wire it into a
 
 ---
 
+## Permissions
+
+Raw SQL (`db sql`, `db push`/`status`/`rollback`/`reset`, `gen types`, `db diff`) runs only for the user who **created** the project; other workspace members get a 403 explaining this.
+
 ## Configuration & files
 
 | Path | Scope | Contents |
 | --- | --- | --- |
-| `~/.orbitnest/credentials.json` | global, `0600` | Access/refresh tokens, API URL, user. Shared with the OrbitNest MCP server. |
-| `./.orbitnest/config.json` | per-directory | Linked `projectId`, `slug`, `name`. Safe to commit. |
+| `~/.orbitnest/credentials.json` | global, `0600` | Access/refresh tokens, API URL, user. Shared with the OrbitNest MCP server; token refreshes are serialised through `~/.orbitnest/credentials.lock`. |
+| `./.orbitnest/config.json` | per-directory | Linked `projectId`, `projectSlug`, `name`, `apiUrl` (same file the MCP server reads; older files with `slug` still work). Safe to commit. |
 
 Environment variables (override stored values):
 

@@ -1,14 +1,16 @@
 import type { Sql } from './migrate';
 
+// node-postgres returns int8/numeric as strings (no type parser is installed
+// server-side), so they are typed `string` to match the JSON the API returns.
 const PG_TO_TS: Record<string, string> = {
-  smallint: 'number', integer: 'number', bigint: 'number', int2: 'number', int4: 'number', int8: 'number',
-  numeric: 'number', decimal: 'number', real: 'number', 'double precision': 'number', float4: 'number', float8: 'number',
+  smallint: 'number', integer: 'number', bigint: 'string', int2: 'number', int4: 'number', int8: 'string',
+  numeric: 'string', decimal: 'string', real: 'number', 'double precision': 'number', float4: 'number', float8: 'number',
   boolean: 'boolean', bool: 'boolean',
   text: 'string', 'character varying': 'string', varchar: 'string', character: 'string', char: 'string',
   bpchar: 'string', citext: 'string', uuid: 'string', name: 'string',
   date: 'string', timestamp: 'string', 'timestamp without time zone': 'string', 'timestamp with time zone': 'string',
   timestamptz: 'string', time: 'string', interval: 'string',
-  json: 'Record<string, unknown>', jsonb: 'Record<string, unknown>',
+  json: 'unknown', jsonb: 'unknown',
   bytea: 'string',
 };
 
@@ -62,10 +64,13 @@ export async function generateTypes(sql: Sql): Promise<string> {
   const dbEntries: string[] = [];
   for (const [tableName, cols] of [...byTable.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const fields = cols.map((c) => {
-      // information_schema reports arrays as data_type 'ARRAY' with udt_name like '_int4'.
+      // information_schema reports arrays as data_type 'ARRAY' with udt_name like
+      // '_int4'; enums (and other user types) as 'USER-DEFINED' — those arrive as text.
       const pgType = c.data_type === 'ARRAY' && c.udt_name ? c.udt_name : c.data_type;
+      const ts = pgType === 'USER-DEFINED' ? 'string' : tsType(pgType);
       const nullable = c.is_nullable === 'YES';
-      return `  ${fieldKey(c.column_name)}${nullable ? '?' : ''}: ${tsType(pgType)}${nullable ? ' | null' : ''};`;
+      // Selected rows always carry every column, so nullable ≠ optional.
+      return `  ${fieldKey(c.column_name)}: ${ts}${nullable ? ' | null' : ''};`;
     });
     const iface = pascalCase(tableName);
     blocks.push(`export interface ${iface} {\n${fields.join('\n')}\n}`);

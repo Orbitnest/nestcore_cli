@@ -8,6 +8,7 @@ import {
   jwtExpiry,
   loadCredentials,
   loadLink,
+  matchProject,
   resolveProjectId,
   saveCredentials,
   saveLink,
@@ -25,8 +26,9 @@ import {
   SNAPSHOT_PATH,
 } from './schema-diff';
 import { color, ExitSignal, fail, heading, info, log, success, table, warn } from './ui';
+import pkg from '../package.json';
 
-const VERSION = '0.1.0';
+const VERSION: string = pkg.version;
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
 const ALIAS: Record<string, string> = {
@@ -172,10 +174,17 @@ async function cmdLogin(flags: Record<string, string | boolean>) {
 
 async function cmdLogout() {
   const creds = loadCredentials();
-  if (creds.refresh_token) {
-    await new Api(apiUrl(), creds.access_token)
-      .post('/auth/signout', { refresh_token: creds.refresh_token })
-      .catch(() => undefined);
+  if (creds.refresh_token && creds.access_token) {
+    try {
+      // The access token is usually expired (15 min); this call refreshes it
+      // through the shared refresher. Signout then sends the CURRENT refresh
+      // token — a rotated-away one would match no session and revoke nothing.
+      const api = authed();
+      await api.get('/auth/profile');
+      await api.post('/auth/signout', { refresh_token: loadCredentials().refresh_token });
+    } catch (e) {
+      warn(`Could not revoke the server session (${(e as Error).message}); it expires on its own within 7 days.`);
+    }
   }
   saveCredentials({ apiUrl: creds.apiUrl });
   success('Logged out.');
@@ -210,7 +219,7 @@ async function cmdLink(positionals: string[]) {
   if (!ref) {
     if (projects.length === 1) {
       const p = projects[0];
-      saveLink({ projectId: p.id, slug: p.slug, name: p.name, apiUrl: apiUrl() });
+      saveLink({ projectId: p.id, projectSlug: p.slug, name: p.name, apiUrl: apiUrl() });
       success(`Linked to ${color.bold(p.name)} (${p.slug}).`);
       return;
     }
@@ -218,11 +227,8 @@ async function cmdLink(positionals: string[]) {
     table(projects.map((p) => ({ name: String(p.name ?? ''), slug: String(p.slug ?? '') })), ['name', 'slug']);
     return;
   }
-  const match =
-    projects.find((p) => p.id === ref || p.slug === ref) ??
-    projects.find((p) => String(p.name).toLowerCase() === ref.toLowerCase());
-  if (!match) fail(`No project matching "${ref}". Run \`orbitnest projects\` to see them.`);
-  saveLink({ projectId: match.id, slug: match.slug, name: match.name, apiUrl: apiUrl() });
+  const match = matchProject(projects, ref);
+  saveLink({ projectId: match.id, projectSlug: match.slug, name: match.name, apiUrl: apiUrl() });
   success(`Linked this directory to ${color.bold(match.name)} (${match.slug}).`);
   log(color.dim('  Wrote .orbitnest/config.json'));
 }
@@ -255,7 +261,13 @@ async function cmdDbStatus(flags: Record<string, string | boolean>) {
     entries.map((e) => ({
       id: e.id,
       name: e.name,
-      status: e.mismatch ? color.red('modified') : e.applied ? color.green('applied') : color.dim('pending'),
+      status: e.mismatch
+        ? color.red('modified')
+        : e.applied
+          ? color.green('applied')
+          : e.status === 'failed'
+            ? color.red('failed')
+            : color.dim('pending'),
     })),
     ['id', 'name', 'status'],
   );

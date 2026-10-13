@@ -6,7 +6,9 @@ import { createHash } from 'crypto';
 export type Sql = (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 
 const FILE_RE = /^(\d+)[_-](.+)\.sql$/i;
-const DOWN_RE = /^\s*--+\s*(migrate:)?down\b.*$/i;
+// The whole line must be the marker (`-- migrate:down`, `-- down`, `--- DOWN ---`),
+// so a comment like `-- Down-sampled …` stays in the up section (same as node_sdk).
+const DOWN_RE = /^\s*--+\s*(migrate:)?down\s*-*\s*$/i;
 
 const REGISTRY_DDL = `
 CREATE TABLE IF NOT EXISTS migrations (
@@ -169,10 +171,23 @@ export async function reset(sql: Sql, dir: string): Promise<{ dropped: string[];
         AND tablename NOT LIKE '\\_%'
       ORDER BY tablename`,
   );
+  const tables = rows
+    .map((r) => r.tablename as string)
+    .filter((t) => t && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(t));
+  const drops = tables.map((t) => `DROP TABLE IF EXISTS "${t}" CASCADE;`).join('\n');
+
+  // Dry run first: drop + every migration inside one transaction that is rolled
+  // back. If any migration cannot run on an empty schema, nothing is dropped.
+  const files = scan(dir);
+  const ups = files.map((f) => f.up.trim()).filter(Boolean).map((b) => (b.endsWith(';') ? b : `${b};`));
+  try {
+    await sql(`BEGIN;\n${drops}\n${ups.join('\n')}\nROLLBACK;`);
+  } catch (e) {
+    throw new Error(`Reset aborted — nothing was dropped. The migrations do not apply cleanly to an empty database: ${(e as Error).message}`);
+  }
+
   const dropped: string[] = [];
-  for (const r of rows) {
-    const t = r.tablename as string;
-    if (!t || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(t)) continue;
+  for (const t of tables) {
     await sql(`DROP TABLE IF EXISTS "${t}" CASCADE`);
     dropped.push(t);
   }

@@ -1,6 +1,6 @@
 import { homedir } from 'os';
 import { join, resolve } from 'path';
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, openSync, closeSync, unlinkSync, statSync } from 'fs';
 import { fail } from './ui';
 
 const DEFAULT_API = 'https://api.orbitnest.io';
@@ -8,6 +8,9 @@ const DEFAULT_API = 'https://api.orbitnest.io';
 // Global credentials (shared with the OrbitNest MCP server) — 0600.
 const CRED_DIR = join(homedir(), '.orbitnest');
 const CRED_FILE = join(CRED_DIR, 'credentials.json');
+// Advisory lock shared with the MCP server — serialises refresh-token rotation
+// across processes (the API revokes every session when a consumed token is replayed).
+const CRED_LOCK = join(CRED_DIR, 'credentials.lock');
 
 // Per-directory project link — safe to commit.
 const LINK_DIR = resolve('.orbitnest');
@@ -21,9 +24,14 @@ export interface Credentials {
   user?: { id?: string; email?: string; full_name?: string };
 }
 
+/**
+ * `.orbitnest/config.json`, shared with the MCP server. Canonical shape is
+ * `{ projectId, projectSlug, name?, apiUrl? }`; CLI <= 0.5 wrote `slug`, so
+ * readers accept either.
+ */
 export interface ProjectLink {
   projectId: string;
-  slug: string;
+  projectSlug?: string;
   name?: string;
   apiUrl?: string;
 }
@@ -36,31 +44,75 @@ export function loadCredentials(): Credentials {
   }
 }
 
+/** Atomic write (temp file + rename) so a concurrent reader never sees a partial file. */
 export function saveCredentials(c: Credentials): void {
-  mkdirSync(CRED_DIR, { recursive: true });
-  writeFileSync(CRED_FILE, JSON.stringify(c, null, 2), { mode: 0o600 });
+  mkdirSync(CRED_DIR, { recursive: true, mode: 0o700 });
+  const body = JSON.stringify(c, null, 2);
+  const tmp = `${CRED_FILE}.${process.pid}.tmp`;
+  writeFileSync(tmp, body, { mode: 0o600 });
+  try {
+    renameSync(tmp, CRED_FILE);
+  } catch {
+    // Windows can refuse the rename while another process has the file open.
+    writeFileSync(CRED_FILE, body, { mode: 0o600 });
+    try { unlinkSync(tmp); } catch { /* ignore */ }
+  }
+  // `mode` only applies on creation — tighten a pre-existing wider file too.
+  try { chmodSync(CRED_FILE, 0o600); } catch { /* no-op on Windows */ }
+}
+
+/** Run `fn` while holding the cross-process credentials lock (shared with the MCP server). */
+export async function withCredentialsLock<T>(fn: () => Promise<T>): Promise<T> {
+  mkdirSync(CRED_DIR, { recursive: true, mode: 0o700 });
+  const deadline = Date.now() + 90_000;
+  let fd: number | undefined;
+  while (fd === undefined) {
+    try {
+      fd = openSync(CRED_LOCK, 'wx');
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      // A holder that crashed leaves the lock behind; a refresh never takes 75s.
+      try { if (Date.now() - statSync(CRED_LOCK).mtimeMs > 75_000) unlinkSync(CRED_LOCK); } catch { /* raced */ }
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${CRED_LOCK}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    closeSync(fd);
+    try { unlinkSync(CRED_LOCK); } catch { /* ignore */ }
+  }
 }
 
 export function loadLink(): ProjectLink | null {
   try {
-    return JSON.parse(readFileSync(LINK_FILE, 'utf8')) as ProjectLink;
+    const raw = JSON.parse(readFileSync(LINK_FILE, 'utf8'));
+    if (!raw?.projectId) return null;
+    return { projectId: raw.projectId, projectSlug: raw.projectSlug ?? raw.slug, name: raw.name, apiUrl: raw.apiUrl };
   } catch {
     return null;
   }
 }
 
 export function saveLink(link: ProjectLink): void {
-  mkdirSync(LINK_DIR, { recursive: true });
-  writeFileSync(LINK_FILE, JSON.stringify(link, null, 2));
+  try {
+    mkdirSync(LINK_DIR, { recursive: true });
+    writeFileSync(LINK_FILE, JSON.stringify(link, null, 2));
+  } catch (e) {
+    fail(`Could not write ${LINK_FILE}: ${(e as Error).message}`);
+  }
 }
+
+const stripSlash = (u: string) => u.replace(/\/+$/, '');
 
 /** Resolve the API base URL: env → linked project → credentials → default. */
 export function apiUrl(): string {
-  return (
+  return stripSlash(
     process.env.ORBITNEST_API_URL ||
-    loadLink()?.apiUrl ||
-    loadCredentials().apiUrl ||
-    DEFAULT_API
+      loadLink()?.apiUrl ||
+      loadCredentials().apiUrl ||
+      DEFAULT_API,
   );
 }
 
@@ -83,11 +135,15 @@ export class ApiError extends Error {
 
 /** Minimal fetch-based client for the OrbitNest admin API (`${apiUrl}/api`). */
 export class Api {
+  private readonly base: string;
+
   constructor(
-    private readonly base: string,
+    base: string,
     private token?: string,
-    private readonly refresher?: () => Promise<string | null>,
-  ) {}
+    private readonly refresher?: (staleToken?: string) => Promise<string | null>,
+  ) {
+    this.base = stripSlash(base);
+  }
 
   private async req<T>(
     method: string,
@@ -133,13 +189,20 @@ export class Api {
     if (!res.ok) {
       // Transparently refresh an expired access token once, then retry.
       if (res.status === 401 && !opts.noAuth && this.refresher && !opts.retried) {
-        const fresh = await this.refresher();
+        const fresh = await this.refresher(this.token);
         if (fresh) {
           this.token = fresh;
           return this.req<T>(method, path, body, { ...opts, retried: true });
         }
       }
-      throw new ApiError(json?.message || json?.error || res.statusText, res.status);
+      let msg = json?.message || json?.error || res.statusText;
+      if (Array.isArray(msg)) msg = msg.join('; ');
+      if (res.status === 403 && /restricted to the project owner/i.test(String(msg))) {
+        msg +=
+          '. Raw SQL (incl. migrations, db reset, gen types, db diff), dropping tables, RLS toggles and policy ' +
+          'changes are limited to the user who created the project. Ask the project owner to run this.';
+      }
+      throw new ApiError(msg, res.status);
     }
     return json as T;
   }
@@ -169,27 +232,51 @@ export function authed(): Api {
  * Exchange the stored refresh token for a fresh access token and persist it.
  * Returns the new access token, or null if there's nothing to refresh with or
  * the refresh was rejected (the caller then surfaces the original 401).
+ *
+ * The API rotates refresh tokens and revokes ALL of the admin's sessions when a
+ * consumed one is replayed. So this runs under the shared lock and re-reads the
+ * file first: if another process (the MCP server, another CLI run) already
+ * rotated, its fresh access token is used instead of refreshing again.
  */
-async function refreshAccessToken(): Promise<string | null> {
-  const creds = loadCredentials();
-  if (!creds.refresh_token) return null;
+async function refreshAccessToken(staleToken?: string): Promise<string | null> {
   try {
-    const res = await new Api(apiUrl()).post<any>(
-      '/auth/refresh',
-      { refresh_token: creds.refresh_token },
-      { noAuth: true },
-    );
-    const access = res.access_token ?? res.data?.access_token;
-    const refresh = res.refresh_token ?? res.data?.refresh_token ?? creds.refresh_token;
-    if (!access) return null;
-    saveCredentials({ ...creds, access_token: access, refresh_token: refresh, expires_at: jwtExpiry(access) });
-    return access;
+    return await withCredentialsLock(async () => {
+      const creds = loadCredentials();
+      if (creds.access_token && creds.access_token !== staleToken) return creds.access_token;
+      if (!creds.refresh_token) return null;
+      const res = await new Api(apiUrl()).post<any>(
+        '/auth/refresh',
+        { refresh_token: creds.refresh_token },
+        { noAuth: true },
+      );
+      const access = res.access_token ?? res.data?.access_token;
+      const refresh = res.refresh_token ?? res.data?.refresh_token ?? creds.refresh_token;
+      if (!access) return null;
+      saveCredentials({ ...creds, access_token: access, refresh_token: refresh, expires_at: jwtExpiry(access) });
+      return access;
+    });
   } catch {
     return null;
   }
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Find a project by id or slug, falling back to a case-insensitive name. A name
+ * shared by several projects is refused, so `db push` / `db reset` never target
+ * an arbitrary one of them.
+ */
+export function matchProject(projects: any[], ref: string): any {
+  const exact = projects.find((p) => p.id === ref || p.slug === ref);
+  if (exact) return exact;
+  const byName = projects.filter((p) => String(p.name).toLowerCase() === ref.toLowerCase());
+  if (byName.length > 1) {
+    fail(`"${ref}" matches ${byName.length} projects (${byName.map((p) => p.slug).join(', ')}). Use the slug or id instead.`);
+  }
+  if (!byName[0]) fail(`No project matching "${ref}". Run \`orbitnest projects\` to see them.`);
+  return byName[0];
+}
 
 /**
  * Resolve the active project id: `--project` flag → linked project → error.
@@ -204,13 +291,10 @@ export async function resolveProjectId(
     if (UUID_RE.test(flagProject)) return { id: flagProject };
     const res = await api.get<any>('/projects');
     const projects: any[] = Array.isArray(res) ? res : (res?.data ?? res?.projects ?? []);
-    const match =
-      projects.find((p) => p.id === flagProject || p.slug === flagProject) ??
-      projects.find((p) => String(p.name).toLowerCase() === flagProject.toLowerCase());
-    if (!match) fail(`No project matching "${flagProject}". Run \`orbitnest projects\` to see them.`);
+    const match = matchProject(projects, flagProject);
     return { id: match.id, slug: match.slug };
   }
   const link = loadLink();
-  if (link) return { id: link.projectId, slug: link.slug };
+  if (link) return { id: link.projectId, slug: link.projectSlug };
   fail('No project selected. Run `orbitnest link <project>` or pass `--project <id|slug>`.');
 }
