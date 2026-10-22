@@ -432,6 +432,45 @@ async function cmdWebhooks(rest: string[], flags: Record<string, string | boolea
   }
 }
 
+// flag → [auth_settings group, key, limits field]
+const AUTH_SECURITY_FLAGS: Array<[string, string, string, string]> = [
+  ['code-length', 'otp_config', 'code_length', 'codeLength'],
+  ['code-expiry', 'otp_config', 'expiry_minutes', 'otpExpiryMinutes'],
+  ['max-attempts', 'otp_config', 'max_attempts', 'otpMaxAttempts'],
+  ['codes-per-hour', 'rate_limiting', 'otp_requests_per_hour', 'otpRequestsPerHour'],
+  ['lockout-attempts', 'lockout_policy', 'max_failed_attempts', 'lockoutMaxFailures'],
+  ['lockout-minutes', 'lockout_policy', 'lockout_duration_minutes', 'lockoutMinutes'],
+];
+
+async function cmdAuthSecurity(rest: string[], flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const base = `/projects/${encodeURIComponent(id)}/auth-settings`;
+  const sub = rest[0] ?? 'get';
+  const show = (limits: Record<string, number>) => {
+    heading('End-user auth security');
+    table(AUTH_SECURITY_FLAGS.map(([flag, group, key, field]) => ({ setting: `${group}.${key}`, value: String(limits[field]), flag: `--${flag}` })), ['setting', 'value', 'flag']);
+  };
+  if (sub === 'get') {
+    const res = await api.get<any>(base);
+    show((res?.data ?? res).limits);
+  } else if (sub === 'set') {
+    const body: Record<string, Record<string, number>> = {};
+    for (const [flag, group, key] of AUTH_SECURITY_FLAGS) {
+      const v = str(flags, flag);
+      if (v === undefined) continue;
+      if (!/^\d+$/.test(v)) fail(`--${flag} must be a whole number`);
+      (body[group] ??= {})[key] = Number(v);
+    }
+    if (Object.keys(body).length === 0) fail(`Nothing to set. Use ${AUTH_SECURITY_FLAGS.map(([f]) => '--' + f).join(' ')}.`);
+    const res = await api.put<any>(base, body);
+    success('Auth security saved (all API instances apply it within 30 seconds).');
+    show((res?.data ?? res).limits);
+  } else {
+    fail('Usage: orbitnest auth-security <get|set>');
+  }
+}
+
 async function cmdSms(rest: string[], flags: Record<string, string | boolean>) {
   const api = authed();
   const { id } = await resolveProjectId(api, str(flags, 'project'));
@@ -504,6 +543,11 @@ ${color.bold('Integrations')}
   sms set [--sid][--token][--from][--enable|--disable]
   sms test <phone>                      Send a test SMS
 
+${color.bold('End-user auth')}
+  auth-security get                     Show code length, code/request limits and lockout
+  auth-security set [--code-length 6-8][--code-expiry][--max-attempts]
+                    [--codes-per-hour][--lockout-attempts][--lockout-minutes]
+
 ${color.bold('Options')}
   -p, --project <id>    Target project (overrides the linked one)
   -d, --dir <path>      Migrations directory (default: migrations)
@@ -547,6 +591,7 @@ async function main() {
       }
     case 'webhooks': return cmdWebhooks(rest, flags);
     case 'sms': return cmdSms(rest, flags);
+    case 'auth-security': return cmdAuthSecurity(rest, flags);
     case 'gen':
       if (rest[0] === 'types') return cmdGenTypes(flags);
       return fail('Usage: orbitnest gen types');
