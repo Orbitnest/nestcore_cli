@@ -216,8 +216,8 @@ export class Api {
   put<T>(path: string, body?: unknown) {
     return this.req<T>('PUT', path, body);
   }
-  del<T>(path: string) {
-    return this.req<T>('DELETE', path);
+  del<T>(path: string, query?: Record<string, string | undefined>) {
+    return this.req<T>('DELETE', path, undefined, { query });
   }
 }
 

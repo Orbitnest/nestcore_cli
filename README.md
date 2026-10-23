@@ -79,11 +79,23 @@ orbitnest gen types              # → orbitnest.types.ts
 | `orbitnest sms set [--sid <s>] [--token <t>] [--from <n>] [--enable\|--disable]` | Configure Twilio (auth token stored encrypted). |
 | `orbitnest sms test <phone>` | Send a test SMS. |
 
+### AI
+
+| Command | Description |
+| --- | --- |
+| `orbitnest ai overview` | Counts of memories, memory subjects, collections, documents, threads, messages, traces (last 24 h) and embedded columns. Shows zeros until the project uses an AI feature. |
+| `orbitnest ai embeddings list` | Embedded columns with progress: rows, embedded, pending, failed and the last error. |
+| `orbitnest ai embeddings enable --table <t> --columns <a,b> [--target <col>] [--model <m>] [--provider <p>]` | Keep a `vector(768)` column (default `<first column>_embedding`) up to date from the source columns, and backfill existing rows. Admin role. |
+| `orbitnest ai embeddings reembed <table> <column> [--model <m>] [--provider <p>]` | Re-embed every row, optionally switching model. Admin role. |
+| `orbitnest ai embeddings disable <table> <column> [--drop-columns]` | Stop embedding a column; `--drop-columns` also drops the vector columns. Admin role. |
+| `orbitnest ai collections list` | Vector collections with their model, document counts and chunking. |
+| `orbitnest ai traces [--limit n] [--status ok\|error]` | Recent AI calls (default 20, max 500): kind, caller, model, tokens, cost, latency and status. |
+
 ### Options
 
 | Option | Applies to | Description |
 | --- | --- | --- |
-| `-p, --project <id\|slug>` | db / gen | Target a specific project, overriding the linked one. |
+| `-p, --project <id\|slug>` | db / gen / webhooks / sms / auth-security / ai | Target a specific project, overriding the linked one. |
 | `-d, --dir <path>` | migration / db | Migrations directory (default `migrations`). |
 | `-o, --out <file>` | gen types | Output file. |
 | `--stdout` | gen types | Print to stdout instead of a file. |

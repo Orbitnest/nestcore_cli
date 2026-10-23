@@ -1,6 +1,6 @@
 {
   "name": "@orbitneststudio/cli",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Command-line interface for the OrbitNest platform — auth, projects, migrations, type generation, and SQL.",
   "bin": {
     "orbitnest": "dist/index.js"

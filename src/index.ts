@@ -508,6 +508,138 @@ async function cmdSms(rest: string[], flags: Record<string, string | boolean>) {
   }
 }
 
+// ── AI (admin routes; Studio → Project Settings → AI) ───────────────────────
+const AI_USAGE = 'Usage: orbitnest ai <overview|embeddings|collections|traces>';
+const EMBED_USAGE =
+  'Usage: orbitnest ai embeddings list\n' +
+  '       orbitnest ai embeddings enable --table <t> --columns <a,b> [--target <col>] [--model <m>] [--provider <p>]\n' +
+  '       orbitnest ai embeddings reembed <table> <column> [--model <m>] [--provider <p>]\n' +
+  '       orbitnest ai embeddings disable <table> <column> [--drop-columns]';
+
+const shortTime = (iso: unknown) => (typeof iso === 'string' ? iso.slice(0, 19).replace('T', ' ') : '');
+const usd = (n: unknown) => (n === null || n === undefined ? '—' : `$${Number(n).toFixed(6).replace(/0+$/, '').replace(/\.$/, '')}`);
+
+function showEmbeddings(cols: any[]) {
+  heading(`Embedded columns (${cols.length})`);
+  table(
+    cols.map((c) => ({
+      table: String(c.table),
+      column: String(c.column),
+      sources: (c.sourceColumns ?? []).join(','),
+      model: String(c.model ?? '(first batch picks)'),
+      embedded: `${c.embedded ?? 0}/${c.rows ?? 0}`,
+      pending: String(c.pending ?? 0),
+      failed: c.failed ? color.red(String(c.failed)) : '0',
+    })),
+    ['table', 'column', 'sources', 'model', 'embedded', 'pending', 'failed'],
+  );
+  for (const c of cols) if (c.lastError) warn(`${c.table}.${c.column}: ${c.lastError}`);
+}
+
+async function cmdAi(rest: string[], flags: Record<string, string | boolean>) {
+  const api = authed();
+  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const pid = encodeURIComponent(id);
+  const area = rest[0] ?? 'overview';
+
+  if (area === 'overview') {
+    const o = (await api.get<any>(`/projects/${pid}/ai/data/overview`))?.data ?? {};
+    heading('AI data');
+    if (!o.enabled) info('Not in use yet: the AI tables are created the first time the project uses memory, collections, threads or embeddings.');
+    const rows: Array<[string, string]> = [
+      ['memories', 'memories'], ['subjects', 'memory subjects'], ['collections', 'collections'], ['documents', 'documents'],
+      ['threads', 'threads'], ['messages', 'thread messages'], ['traces24h', 'traces (last 24 h)'], ['embeddedColumns', 'embedded columns'],
+    ];
+    table(rows.map(([k, label]) => ({ metric: label, value: String(o[k] ?? 0) })), ['metric', 'value']);
+    return;
+  }
+
+  if (area === 'embeddings') {
+    const base = `/projects/${pid}/database/embeddings`;
+    const sub = rest[1] ?? 'list';
+    if (sub === 'list') {
+      const res = await api.get<any>(base);
+      showEmbeddings(listFrom(res));
+    } else if (sub === 'enable') {
+      const t = str(flags, 'table');
+      const columns = (str(flags, 'columns') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (!t || !columns.length) fail(EMBED_USAGE);
+      const body: Record<string, unknown> = { table: t, sourceColumns: columns };
+      if (str(flags, 'target')) body.targetColumn = str(flags, 'target');
+      if (str(flags, 'model')) body.model = str(flags, 'model');
+      if (str(flags, 'provider')) body.provider = str(flags, 'provider');
+      const res = await api.post<any>(base, body);
+      const c = res?.data ?? res;
+      success(`Embedding ${color.bold(`${c.table}.${c.column}`)} from ${(c.sourceColumns ?? columns).join(', ')}; ${c.pending ?? 0} row(s) queued.`);
+      log(color.dim('  New and changed rows are embedded in the background. Check progress with `orbitnest ai embeddings list`.'));
+    } else if (sub === 'reembed') {
+      const [t, col] = [rest[2], rest[3]];
+      if (!t || !col) fail(EMBED_USAGE);
+      const body: Record<string, unknown> = {};
+      if (str(flags, 'model')) body.model = str(flags, 'model');
+      if (str(flags, 'provider')) body.provider = str(flags, 'provider');
+      const res = await api.post<any>(`${base}/${encodeURIComponent(t)}/${encodeURIComponent(col)}/reembed`, body);
+      const c = res?.data ?? res;
+      success(`Re-embedding ${color.bold(`${t}.${col}`)} with ${c?.model ?? 'the current model'}; ${c?.pending ?? 0} row(s) queued.`);
+    } else if (sub === 'disable') {
+      const [t, col] = [rest[2], rest[3]];
+      if (!t || !col) fail(EMBED_USAGE);
+      await api.del(`${base}/${encodeURIComponent(t)}/${encodeURIComponent(col)}`, flags['drop-columns'] ? { dropColumns: 'true' } : undefined);
+      success(`Stopped embedding ${color.bold(`${t}.${col}`)}${flags['drop-columns'] ? ' and dropped its vector columns' : ' (the vector columns are kept)'}.`);
+    } else {
+      fail(EMBED_USAGE);
+    }
+    return;
+  }
+
+  if (area === 'collections') {
+    if ((rest[1] ?? 'list') !== 'list') fail('Usage: orbitnest ai collections list');
+    const cols = listFrom(await api.get<any>(`/projects/${pid}/ai/collections`));
+    heading(`Collections (${cols.length})`);
+    table(
+      cols.map((c) => ({
+        name: String(c.name),
+        model: String(c.embed_model ?? '(first document picks)'),
+        documents: String(c.documents ?? 0),
+        pending: String(c.pending ?? 0),
+        chunking: `${c.chunk_tokens}/${c.chunk_overlap}`,
+        'user ingest': c.user_ingest ? 'yes' : 'no',
+      })),
+      ['name', 'model', 'documents', 'pending', 'chunking', 'user ingest'],
+    );
+    return;
+  }
+
+  if (area === 'traces') {
+    const limit = str(flags, 'limit');
+    if (limit !== undefined && !/^\d+$/.test(limit)) fail('--limit must be a whole number (1-500)');
+    const status = str(flags, 'status');
+    if (status !== undefined && status !== 'ok' && status !== 'error') fail('--status must be ok or error');
+    const res = await api.get<any>(`/projects/${pid}/ai/traces`, { limit: limit ?? '20', status });
+    const d = res?.data ?? {};
+    const traces: any[] = d.traces ?? [];
+    heading(`AI traces (${traces.length} of ${d.total ?? 0})`);
+    table(
+      traces.map((t) => ({
+        time: shortTime(t.created_at),
+        kind: String(t.kind ?? ''),
+        caller: String(t.caller ?? ''),
+        model: String(t.model ?? ''),
+        tokens: `${t.tokens_in ?? 0}/${t.tokens_out ?? 0}`,
+        cost: usd(t.cost_usd),
+        ms: String(t.latency_ms ?? ''),
+        status: t.status === 'error' ? color.red('error') : 'ok',
+      })),
+      ['time', 'kind', 'caller', 'model', 'tokens', 'cost', 'ms', 'status'],
+    );
+    for (const t of traces) if (t.error) warn(`${shortTime(t.created_at)} ${t.model}: ${t.error}`);
+    if (d.retentionDays) log(color.dim(`\nTraces are kept ${d.retentionDays} day(s) on this plan. Prompts and replies are never stored, only a hash.`));
+    return;
+  }
+
+  fail(AI_USAGE);
+}
+
 // ── help ─────────────────────────────────────────────────────────────────────
 function printHelp() {
   log(`${color.bold('orbitnest')} ${color.dim('v' + VERSION)} — OrbitNest platform CLI
@@ -547,6 +679,16 @@ ${color.bold('End-user auth')}
   auth-security get                     Show code length, code/request limits and lockout
   auth-security set [--code-length 6-8][--code-expiry][--max-attempts]
                     [--codes-per-hour][--lockout-attempts][--lockout-minutes]
+
+${color.bold('AI')}
+  ai overview                           Counts of memories, collections, threads, traces
+  ai embeddings list                    Embedded columns with progress
+  ai embeddings enable --table <t> --columns <a,b> [--target <col>] [--model <m>]
+  ai embeddings reembed <table> <column> [--model <m>]
+  ai embeddings disable <table> <column> [--drop-columns]
+  ai collections list                   Vector collections and document counts
+  ai traces [--limit n] [--status ok|error]
+                                        Recent model calls: tokens, cost, latency
 
 ${color.bold('Options')}
   -p, --project <id>    Target project (overrides the linked one)
@@ -592,6 +734,7 @@ async function main() {
     case 'webhooks': return cmdWebhooks(rest, flags);
     case 'sms': return cmdSms(rest, flags);
     case 'auth-security': return cmdAuthSecurity(rest, flags);
+    case 'ai': return cmdAi(rest, flags);
     case 'gen':
       if (rest[0] === 'types') return cmdGenTypes(flags);
       return fail('Usage: orbitnest gen types');
