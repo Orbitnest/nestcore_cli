@@ -5,6 +5,7 @@ import {
   ApiError,
   apiUrl,
   authed,
+  envVar,
   jwtExpiry,
   loadCredentials,
   loadLink,
@@ -70,7 +71,7 @@ function promptLine(question: string): Promise<string> {
 
 function promptSecret(question: string): Promise<string> {
   if (!process.stdin.isTTY) {
-    fail('Cannot prompt for a password without a TTY. Use --password or ORBITNEST_PASSWORD.');
+    fail('Cannot prompt for a password without a TTY. Use --password or NESTCORE_PASSWORD.');
   }
   return new Promise((resolve, reject) => {
     process.stdout.write(question);
@@ -128,8 +129,8 @@ function listFrom(res: any): any[] {
 // ── commands ─────────────────────────────────────────────────────────────────
 async function cmdLogin(flags: Record<string, string | boolean>) {
   const url = str(flags, 'url') || apiUrl();
-  const email = str(flags, 'email') || process.env.ORBITNEST_EMAIL || (await promptLine('Email: '));
-  const password = str(flags, 'password') || process.env.ORBITNEST_PASSWORD || (await promptSecret('Password: '));
+  const email = str(flags, 'email') || envVar('EMAIL') || (await promptLine('Email: '));
+  const password = str(flags, 'password') || envVar('PASSWORD') || (await promptSecret('Password: '));
   if (!email || !password) fail('Email and password are required.');
 
   const api = new Api(url);
@@ -145,10 +146,10 @@ async function cmdLogin(flags: Record<string, string | boolean>) {
   // recovery code) via POST /auth/signin/mfa.
   if (res?.mfa_required ?? res?.data?.mfa_required) {
     const challengeToken = res.challenge_token ?? res.data?.challenge_token;
-    let code = str(flags, 'code') || process.env.ORBITNEST_MFA_CODE;
+    let code = str(flags, 'code') || envVar('MFA_CODE');
     if (!code) {
       if (!process.stdin.isTTY) {
-        fail('This account has two-factor enabled. Pass --code <code> or set ORBITNEST_MFA_CODE.');
+        fail('This account has two-factor enabled. Pass --code <code> or set NESTCORE_MFA_CODE.');
       }
       code = await promptLine('Two-factor code (authenticator or recovery code): ');
     }
@@ -192,7 +193,7 @@ async function cmdLogout() {
 
 async function cmdWhoami() {
   const creds = loadCredentials();
-  if (!creds.access_token) { warn('Not logged in. Run `orbitnest login`.'); return; }
+  if (!creds.access_token) { warn('Not logged in. Run `nestcore login`.'); return; }
   try {
     const me = await authed().get<any>('/auth/profile');
     const u = me.user ?? me.data ?? me;
@@ -200,7 +201,7 @@ async function cmdWhoami() {
     log(color.dim(`  API: ${apiUrl()}`));
     if (creds.expires_at) log(color.dim(`  token expires: ${creds.expires_at}`));
   } catch (e) {
-    warn(`Session check failed (${(e as ApiError).message}). Try \`orbitnest login\`.`);
+    warn(`Session check failed (${(e as ApiError).message}). Try \`nestcore login\`.`);
   }
 }
 
@@ -223,19 +224,19 @@ async function cmdLink(positionals: string[]) {
       success(`Linked to ${color.bold(p.name)} (${p.slug}).`);
       return;
     }
-    heading('Specify a project to link: `orbitnest link <id|slug>`');
+    heading('Specify a project to link: `nestcore link <id|slug>`');
     table(projects.map((p) => ({ name: String(p.name ?? ''), slug: String(p.slug ?? '') })), ['name', 'slug']);
     return;
   }
   const match = matchProject(projects, ref);
   saveLink({ projectId: match.id, projectSlug: match.slug, name: match.name, apiUrl: apiUrl() });
   success(`Linked this directory to ${color.bold(match.name)} (${match.slug}).`);
-  log(color.dim('  Wrote .orbitnest/config.json'));
+  log(color.dim('  Wrote .nestcore/config.json'));
 }
 
 function cmdMigrationNew(positionals: string[], flags: Record<string, string | boolean>) {
   const name = positionals.join(' ').trim();
-  if (!name) fail('Usage: orbitnest migration new <name>');
+  if (!name) fail('Usage: nestcore migration new <name>');
   const dir = str(flags, 'dir') || 'migrations';
   const { id, path } = mig.createMigration(dir, name);
   success(`Created migration ${color.bold(id)}: ${path}`);
@@ -301,7 +302,7 @@ async function cmdDbSql(positionals: string[], flags: Record<string, string | bo
   const { id } = await resolveProjectId(api, str(flags, 'project'));
   const file = str(flags, 'file');
   const sqlText = file ? readFileSync(file, 'utf8') : positionals.join(' ');
-  if (!sqlText.trim()) fail('Usage: orbitnest db sql "<SQL>"  (or --file <path>)');
+  if (!sqlText.trim()) fail('Usage: nestcore db sql "<SQL>"  (or --file <path>)');
   const { rows } = await sqlRunner(api, id)(sqlText);
   log(JSON.stringify(rows, null, 2));
   log(color.dim(`\n${rows.length} row(s)`));
@@ -312,7 +313,7 @@ async function cmdGenTypes(flags: Record<string, string | boolean>) {
   const { id } = await resolveProjectId(api, str(flags, 'project'));
   const ts = await generateTypes(sqlRunner(api, id));
   if (flags.stdout) { process.stdout.write(ts); return; }
-  const out = str(flags, 'out') || 'orbitnest.types.ts';
+  const out = str(flags, 'out') || 'nestcore.types.ts';
   writeFileSync(out, ts);
   success(`Wrote TypeScript types → ${color.bold(out)}`);
 }
@@ -331,7 +332,7 @@ async function cmdDbDiff(flags: Record<string, string | boolean>) {
 
   const base = loadSnapshot();
   if (!base) {
-    fail(`No schema snapshot found (${SNAPSHOT_PATH}). Run \`orbitnest db diff --save\` to capture the current schema as a baseline.`);
+    fail(`No schema snapshot found (${SNAPSHOT_PATH}). Run \`nestcore db diff --save\` to capture the current schema as a baseline.`);
   }
 
   const diff = diffSnapshots(base!, current);
@@ -353,7 +354,7 @@ async function cmdDbDiff(flags: Record<string, string | boolean>) {
       log(color.yellow(`    ~ ${cc.column}: ${color.dim(describeColumn(cc.before))} → ${color.dim(describeColumn(cc.after))}`));
     }
   }
-  log(color.dim('\nUpdate the baseline with `orbitnest db diff --save`.'));
+  log(color.dim('\nUpdate the baseline with `nestcore db diff --save`.'));
   // Non-zero exit so CI can gate on drift (like `git diff --exit-code`).
   process.exitCode = 1;
 }
@@ -411,24 +412,24 @@ async function cmdWebhooks(rest: string[], flags: Record<string, string | boolea
     );
   } else if (sub === 'create') {
     const url = str(flags, 'url');
-    if (!url) fail('Usage: orbitnest webhooks create --url <url> [--name <n>] [--events INSERT,UPDATE,DELETE] [--table <t>]');
+    if (!url) fail('Usage: nestcore webhooks create --url <url> [--name <n>] [--events INSERT,UPDATE,DELETE] [--table <t>]');
     const events = (str(flags, 'events') || 'INSERT,UPDATE,DELETE').split(',').map((s) => s.trim().toUpperCase());
     const res = await api.post<any>(base, { name: str(flags, 'name') || 'webhook', url, events, table_name: str(flags, 'table') || null });
     const d = res?.data ?? res;
     success(`Created webhook ${color.bold(d.id)}`);
     if (d.secret) log(`  signing secret (shown once): ${color.bold(d.secret)}`);
   } else if (sub === 'delete') {
-    if (!rest[1]) fail('Usage: orbitnest webhooks delete <id>');
+    if (!rest[1]) fail('Usage: nestcore webhooks delete <id>');
     await api.del(`${base}/${encodeURIComponent(rest[1])}`);
     success('Webhook deleted.');
   } else if (sub === 'test') {
-    if (!rest[1]) fail('Usage: orbitnest webhooks test <id>');
+    if (!rest[1]) fail('Usage: nestcore webhooks test <id>');
     const res = await api.post<any>(`${base}/${encodeURIComponent(rest[1])}/test`);
     const d = res?.data ?? res;
     if (d.success) success(`Test delivered (HTTP ${d.status_code}).`);
     else fail(`Test failed: ${d.error || `HTTP ${d.status_code}`}`);
   } else {
-    fail('Usage: orbitnest webhooks <list|create|delete|test>');
+    fail('Usage: nestcore webhooks <list|create|delete|test>');
   }
 }
 
@@ -467,7 +468,7 @@ async function cmdAuthSecurity(rest: string[], flags: Record<string, string | bo
     success('Auth security saved (all API instances apply it within 30 seconds).');
     show((res?.data ?? res).limits);
   } else {
-    fail('Usage: orbitnest auth-security <get|set>');
+    fail('Usage: nestcore auth-security <get|set>');
   }
 }
 
@@ -500,21 +501,21 @@ async function cmdSms(rest: string[], flags: Record<string, string | boolean>) {
     await api.put(base, body);
     success('SMS config saved.');
   } else if (sub === 'test') {
-    if (!rest[1]) fail('Usage: orbitnest sms test <phone>');
+    if (!rest[1]) fail('Usage: nestcore sms test <phone>');
     await api.post(`${base}/test`, { to: rest[1] });
     success(`Test SMS sent to ${rest[1]}.`);
   } else {
-    fail('Usage: orbitnest sms <get|set|test>');
+    fail('Usage: nestcore sms <get|set|test>');
   }
 }
 
-// ── AI (admin routes; Studio → Project Settings → AI) ───────────────────────
-const AI_USAGE = 'Usage: orbitnest ai <overview|embeddings|collections|traces>';
+// ── AI (admin routes; Console → Project Settings → AI) ───────────────────────
+const AI_USAGE = 'Usage: nestcore ai <overview|embeddings|collections|traces>';
 const EMBED_USAGE =
-  'Usage: orbitnest ai embeddings list\n' +
-  '       orbitnest ai embeddings enable --table <t> --columns <a,b> [--target <col>] [--model <m>] [--provider <p>]\n' +
-  '       orbitnest ai embeddings reembed <table> <column> [--model <m>] [--provider <p>]\n' +
-  '       orbitnest ai embeddings disable <table> <column> [--drop-columns]';
+  'Usage: nestcore ai embeddings list\n' +
+  '       nestcore ai embeddings enable --table <t> --columns <a,b> [--target <col>] [--model <m>] [--provider <p>]\n' +
+  '       nestcore ai embeddings reembed <table> <column> [--model <m>] [--provider <p>]\n' +
+  '       nestcore ai embeddings disable <table> <column> [--drop-columns]';
 
 const shortTime = (iso: unknown) => (typeof iso === 'string' ? iso.slice(0, 19).replace('T', ' ') : '');
 const usd = (n: unknown) => (n === null || n === undefined ? '—' : `$${Number(n).toFixed(6).replace(/0+$/, '').replace(/\.$/, '')}`);
@@ -571,7 +572,7 @@ async function cmdAi(rest: string[], flags: Record<string, string | boolean>) {
       const res = await api.post<any>(base, body);
       const c = res?.data ?? res;
       success(`Embedding ${color.bold(`${c.table}.${c.column}`)} from ${(c.sourceColumns ?? columns).join(', ')}; ${c.pending ?? 0} row(s) queued.`);
-      log(color.dim('  New and changed rows are embedded in the background. Check progress with `orbitnest ai embeddings list`.'));
+      log(color.dim('  New and changed rows are embedded in the background. Check progress with `nestcore ai embeddings list`.'));
     } else if (sub === 'reembed') {
       const [t, col] = [rest[2], rest[3]];
       if (!t || !col) fail(EMBED_USAGE);
@@ -593,7 +594,7 @@ async function cmdAi(rest: string[], flags: Record<string, string | boolean>) {
   }
 
   if (area === 'collections') {
-    if ((rest[1] ?? 'list') !== 'list') fail('Usage: orbitnest ai collections list');
+    if ((rest[1] ?? 'list') !== 'list') fail('Usage: nestcore ai collections list');
     const cols = listFrom(await api.get<any>(`/projects/${pid}/ai/collections`));
     heading(`Collections (${cols.length})`);
     table(
@@ -642,10 +643,10 @@ async function cmdAi(rest: string[], flags: Record<string, string | boolean>) {
 
 // ── help ─────────────────────────────────────────────────────────────────────
 function printHelp() {
-  log(`${color.bold('orbitnest')} ${color.dim('v' + VERSION)} — OrbitNest platform CLI
+  log(`${color.bold('nestcore')} ${color.dim('v' + VERSION)} — NestCore platform CLI
 
 ${color.bold('Usage')}
-  orbitnest <command> [options]
+  nestcore <command> [options]     (\`orbitnest\` still works as an alias)
 
 ${color.bold('Auth')}
   login                 Sign in (--email, --password, --code, or env / interactive)
@@ -654,7 +655,7 @@ ${color.bold('Auth')}
 
 ${color.bold('Projects')}
   projects              List your projects
-  link <id|slug>        Link the current directory to a project (.orbitnest/config.json)
+  link <id|slug>        Link the current directory to a project (.nestcore/config.json)
 
 ${color.bold('Database & migrations')}
   migration new <name>  Scaffold a new migration file (NNN_name.sql)
@@ -694,8 +695,8 @@ ${color.bold('Options')}
   -p, --project <id>    Target project (overrides the linked one)
   -d, --dir <path>      Migrations directory (default: migrations)
   -o, --out <file>      Output file for gen types
-      --url <url>       API base URL for login (default: https://api.orbitnest.io)
-      --code <code>     Two-factor code for login (or env ORBITNEST_MFA_CODE)
+      --url <url>       API base URL for login (default: https://api.nestcore.io)
+      --code <code>     Two-factor code for login (or env NESTCORE_MFA_CODE)
   -h, --help            Show help
   -v, --version         Show version
 
@@ -719,7 +720,7 @@ async function main() {
     case 'link': return cmdLink(rest);
     case 'migration':
       if (rest[0] === 'new') return cmdMigrationNew(rest.slice(1), flags);
-      return fail('Usage: orbitnest migration new <name>');
+      return fail('Usage: nestcore migration new <name>');
     case 'db':
       switch (rest[0]) {
         case 'push': return cmdDbPush(flags);
@@ -729,7 +730,7 @@ async function main() {
         case 'sql': return cmdDbSql(rest.slice(1), flags);
         case 'connect': return cmdDbConnect(flags);
         case 'diff': return cmdDbDiff(flags);
-        default: return fail('Usage: orbitnest db <push|status|rollback|reset|sql|connect|diff>');
+        default: return fail('Usage: nestcore db <push|status|rollback|reset|sql|connect|diff>');
       }
     case 'webhooks': return cmdWebhooks(rest, flags);
     case 'sms': return cmdSms(rest, flags);
@@ -737,9 +738,9 @@ async function main() {
     case 'ai': return cmdAi(rest, flags);
     case 'gen':
       if (rest[0] === 'types') return cmdGenTypes(flags);
-      return fail('Usage: orbitnest gen types');
+      return fail('Usage: nestcore gen types');
     default:
-      fail(`Unknown command "${cmd}". Run \`orbitnest --help\`.`);
+      fail(`Unknown command "${cmd}". Run \`nestcore --help\`.`);
   }
 }
 
@@ -749,7 +750,7 @@ main().catch((e) => {
   if (e instanceof ExitSignal) {
     process.exitCode = e.code; // message was already printed by fail()
   } else if (e instanceof ApiError && e.status === 401) {
-    console.error(`${color.red('✗')} Unauthorized — your session may have expired. Run \`orbitnest login\`.`);
+    console.error(`${color.red('✗')} Unauthorized — your session may have expired. Run \`nestcore login\`.`);
     process.exitCode = 1;
   } else {
     console.error(`${color.red('✗')} ${e instanceof Error ? e.message : String(e)}`);

@@ -1,20 +1,33 @@
 import { homedir } from 'os';
 import { join, resolve } from 'path';
-import { readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, openSync, closeSync, unlinkSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync, chmodSync, openSync, closeSync, unlinkSync, statSync, existsSync } from 'fs';
 import { fail } from './ui';
 
-const DEFAULT_API = 'https://api.orbitnest.io';
+const DEFAULT_API = 'https://api.nestcore.io';
 
-// Global credentials (shared with the OrbitNest MCP server) — 0600.
-const CRED_DIR = join(homedir(), '.orbitnest');
+/**
+ * Read a `NESTCORE_<name>` env var, falling back to the pre-rename
+ * `ORBITNEST_<name>` so existing scripts and CI keep working.
+ */
+export function envVar(name: string): string | undefined {
+  return process.env[`NESTCORE_${name}`] || process.env[`ORBITNEST_${name}`] || undefined;
+}
+
+// Global credentials (shared with the NestCore MCP server) — 0600.
+const CRED_DIR = join(homedir(), '.nestcore');
 const CRED_FILE = join(CRED_DIR, 'credentials.json');
+// Pre-rename location: read when the new file is absent, and kept in sync while it
+// exists so an older CLI/MCP sharing it never replays a rotated refresh token.
+const LEGACY_CRED_FILE = join(homedir(), '.orbitnest', 'credentials.json');
 // Advisory lock shared with the MCP server — serialises refresh-token rotation
 // across processes (the API revokes every session when a consumed token is replayed).
 const CRED_LOCK = join(CRED_DIR, 'credentials.lock');
 
 // Per-directory project link — safe to commit.
-const LINK_DIR = resolve('.orbitnest');
+const LINK_DIR = resolve('.nestcore');
 const LINK_FILE = join(LINK_DIR, 'config.json');
+// Pre-rename link written by CLI < 0.8; read when the new one is absent.
+const LEGACY_LINK_FILE = resolve('.orbitnest', 'config.json');
 
 export interface Credentials {
   apiUrl?: string;
@@ -25,7 +38,7 @@ export interface Credentials {
 }
 
 /**
- * `.orbitnest/config.json`, shared with the MCP server. Canonical shape is
+ * `.nestcore/config.json`, shared with the MCP server. Canonical shape is
  * `{ projectId, projectSlug, name?, apiUrl? }`; CLI <= 0.5 wrote `slug`, so
  * readers accept either.
  */
@@ -37,28 +50,39 @@ export interface ProjectLink {
 }
 
 export function loadCredentials(): Credentials {
-  try {
-    return JSON.parse(readFileSync(CRED_FILE, 'utf8')) as Credentials;
-  } catch {
-    return {};
+  for (const file of [CRED_FILE, LEGACY_CRED_FILE]) {
+    if (!existsSync(file)) continue;
+    try {
+      return JSON.parse(readFileSync(file, 'utf8')) as Credentials;
+    } catch {
+      return {};
+    }
   }
+  return {};
 }
 
 /** Atomic write (temp file + rename) so a concurrent reader never sees a partial file. */
-export function saveCredentials(c: Credentials): void {
-  mkdirSync(CRED_DIR, { recursive: true, mode: 0o700 });
-  const body = JSON.stringify(c, null, 2);
-  const tmp = `${CRED_FILE}.${process.pid}.tmp`;
+function writeCredentialsFile(file: string, body: string): void {
+  const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, body, { mode: 0o600 });
   try {
-    renameSync(tmp, CRED_FILE);
+    renameSync(tmp, file);
   } catch {
     // Windows can refuse the rename while another process has the file open.
-    writeFileSync(CRED_FILE, body, { mode: 0o600 });
+    writeFileSync(file, body, { mode: 0o600 });
     try { unlinkSync(tmp); } catch { /* ignore */ }
   }
   // `mode` only applies on creation — tighten a pre-existing wider file too.
-  try { chmodSync(CRED_FILE, 0o600); } catch { /* no-op on Windows */ }
+  try { chmodSync(file, 0o600); } catch { /* no-op on Windows */ }
+}
+
+export function saveCredentials(c: Credentials): void {
+  mkdirSync(CRED_DIR, { recursive: true, mode: 0o700 });
+  const body = JSON.stringify(c, null, 2);
+  writeCredentialsFile(CRED_FILE, body);
+  if (existsSync(LEGACY_CRED_FILE)) {
+    try { writeCredentialsFile(LEGACY_CRED_FILE, body); } catch { /* best-effort */ }
+  }
 }
 
 /** Run `fn` while holding the cross-process credentials lock (shared with the MCP server). */
@@ -87,7 +111,8 @@ export async function withCredentialsLock<T>(fn: () => Promise<T>): Promise<T> {
 
 export function loadLink(): ProjectLink | null {
   try {
-    const raw = JSON.parse(readFileSync(LINK_FILE, 'utf8'));
+    const file = existsSync(LINK_FILE) || !existsSync(LEGACY_LINK_FILE) ? LINK_FILE : LEGACY_LINK_FILE;
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
     if (!raw?.projectId) return null;
     return { projectId: raw.projectId, projectSlug: raw.projectSlug ?? raw.slug, name: raw.name, apiUrl: raw.apiUrl };
   } catch {
@@ -109,7 +134,7 @@ const stripSlash = (u: string) => u.replace(/\/+$/, '');
 /** Resolve the API base URL: env → linked project → credentials → default. */
 export function apiUrl(): string {
   return stripSlash(
-    process.env.ORBITNEST_API_URL ||
+    envVar('API_URL') ||
       loadLink()?.apiUrl ||
       loadCredentials().apiUrl ||
       DEFAULT_API,
@@ -133,7 +158,7 @@ export class ApiError extends Error {
   }
 }
 
-/** Minimal fetch-based client for the OrbitNest admin API (`${apiUrl}/api`). */
+/** Minimal fetch-based client for the NestCore admin API (`${apiUrl}/api`). */
 export class Api {
   private readonly base: string;
 
@@ -224,7 +249,7 @@ export class Api {
 /** An API client authenticated with the stored token, or exit with guidance. */
 export function authed(): Api {
   const creds = loadCredentials();
-  if (!creds.access_token) fail('Not logged in. Run `orbitnest login` first.');
+  if (!creds.access_token) fail('Not logged in. Run `nestcore login` first.');
   return new Api(apiUrl(), creds.access_token, refreshAccessToken);
 }
 
@@ -274,7 +299,7 @@ export function matchProject(projects: any[], ref: string): any {
   if (byName.length > 1) {
     fail(`"${ref}" matches ${byName.length} projects (${byName.map((p) => p.slug).join(', ')}). Use the slug or id instead.`);
   }
-  if (!byName[0]) fail(`No project matching "${ref}". Run \`orbitnest projects\` to see them.`);
+  if (!byName[0]) fail(`No project matching "${ref}". Run \`nestcore projects\` to see them.`);
   return byName[0];
 }
 
@@ -296,5 +321,5 @@ export async function resolveProjectId(
   }
   const link = loadLink();
   if (link) return { id: link.projectId, slug: link.projectSlug };
-  fail('No project selected. Run `orbitnest link <project>` or pass `--project <id|slug>`.');
+  fail('No project selected. Run `nestcore link <project>` or pass `--project <id|slug>`.');
 }

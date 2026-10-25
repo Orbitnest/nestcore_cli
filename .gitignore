@@ -3,5 +3,8 @@ dist/
 *.log
 .DS_Store
 # Local project link / generated artifacts
+.nestcore/
+nestcore.types.ts
+# Pre-rename equivalents
 .orbitnest/
 orbitnest.types.ts

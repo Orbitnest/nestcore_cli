@@ -1,11 +1,11 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { Sql } from './migrate';
 
 /**
- * `orbitnest db diff` — drift detection. Introspect the live `public` schema
+ * `nestcore db diff` — drift detection. Introspect the live `public` schema
  * (tables + columns), compare against a committed baseline snapshot
- * (`.orbitnest/schema.snapshot.json`), and report what changed. This avoids the
+ * (`.nestcore/schema.snapshot.json`), and report what changed. This avoids the
  * pitfalls of generating DDL — it answers "did the live schema drift from what
  * we last recorded?", which is the day-to-day need in a migration workflow.
  */
@@ -23,7 +23,9 @@ export interface SchemaSnapshot {
   tables: Record<string, TableSnapshot>;
 }
 
-export const SNAPSHOT_PATH = join('.orbitnest', 'schema.snapshot.json');
+export const SNAPSHOT_PATH = join('.nestcore', 'schema.snapshot.json');
+/** Baseline written by CLI < 0.8; read when the new one is absent. */
+const LEGACY_SNAPSHOT_PATH = join('.orbitnest', 'schema.snapshot.json');
 
 interface ColRow {
   table_name: string;
@@ -61,14 +63,15 @@ export async function introspectSchema(sql: Sql): Promise<SchemaSnapshot> {
 
 export function loadSnapshot(): SchemaSnapshot | null {
   try {
-    return JSON.parse(readFileSync(SNAPSHOT_PATH, 'utf8')) as SchemaSnapshot;
+    const file = existsSync(SNAPSHOT_PATH) || !existsSync(LEGACY_SNAPSHOT_PATH) ? SNAPSHOT_PATH : LEGACY_SNAPSHOT_PATH;
+    return JSON.parse(readFileSync(file, 'utf8')) as SchemaSnapshot;
   } catch {
     return null;
   }
 }
 
 export function saveSnapshot(snapshot: SchemaSnapshot): string {
-  mkdirSync('.orbitnest', { recursive: true });
+  mkdirSync('.nestcore', { recursive: true });
   writeFileSync(SNAPSHOT_PATH, JSON.stringify(snapshot, null, 2) + '\n');
   return SNAPSHOT_PATH;
 }

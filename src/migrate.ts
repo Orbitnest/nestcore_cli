@@ -210,8 +210,8 @@ export function createMigration(dir: string, name: string): { id: string; path: 
   const path = join(dir, `${id}_${safe}.sql`);
   writeFileSync(
     path,
-    `-- Migration ${id}: ${name}\n-- Forward (up) SQL — applied by \`orbitnest db push\`.\n\n\n` +
-      `-- migrate:down\n-- Rollback SQL — applied by \`orbitnest db rollback\`. Optional but recommended.\n`,
+    `-- Migration ${id}: ${name}\n-- Forward (up) SQL — applied by \`nestcore db push\`.\n\n\n` +
+      `-- migrate:down\n-- Rollback SQL — applied by \`nestcore db rollback\`. Optional but recommended.\n`,
     { flag: 'wx' },
   );
   return { id, path };
