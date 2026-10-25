@@ -13,7 +13,7 @@ npm install -g @nestcore/cli
 npx @nestcore/cli --help
 ```
 
-> Requires Node.js 18+.
+> Requires Node.js 22+.
 
 ---
 
