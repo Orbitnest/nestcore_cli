@@ -1,5 +1,5 @@
 {
-  "name": "@nestcore/cli",
+  "name": "@nestcorehq/cli",
   "version": "0.8.0",
   "description": "Command-line interface for the NestCore platform — auth, projects, migrations, type generation, and SQL.",
   "bin": {
