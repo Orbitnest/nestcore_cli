@@ -91,6 +91,21 @@ nestcore gen types              # → nestcore.types.ts
 | `nestcore ai collections list` | Vector collections with their model, document counts and chunking. |
 | `nestcore ai traces [--limit n] [--status ok\|error]` | Recent AI calls (default 20, max 500): kind, caller, model, tokens, cost, latency and status. |
 
+### AI credit
+
+Prepaid AI credit belongs to the workspace and is shared by all its projects. It pays for AI calls of projects
+without their own provider key (a project's own key always wins), at the platform's key plus the margin. A
+workspace that never bought credit is never charged.
+
+| Command | Description |
+| --- | --- |
+| `nestcore credits` | Balance, monthly cap, this month's spend, whether credit can pay for a call now, the credit packs and the recent ledger. |
+| `nestcore credits buy <pack> [--open]` | Print a Stripe Checkout link for a pack (e.g. `credits_10`) to open and pay in the browser; `--open` opens it. Nothing is charged until you pay, and the credit appears once Stripe confirms. Admin role. |
+| `nestcore credits cap <usd\|off>` | Set the monthly cap on credit spend (e.g. `20` or `12.50`), or remove it with `off`. Admin role. |
+
+An AI call paid from credit fails with `CREDITS_EXHAUSTED` when the balance is gone or the cap is reached; the CLI
+prints which one, the next step and the buy link.
+
 ### Options
 
 | Option | Applies to | Description |
@@ -203,6 +218,7 @@ npm install
 npm run build      # bundle to dist/ with tsup (CJS + shebang)
 npm run dev        # watch mode
 npm run typecheck  # tsc --noEmit
+npm test           # build, then run test/*.mjs against a local fake API
 
 node dist/index.js --help
 ```
