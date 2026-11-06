@@ -155,8 +155,9 @@ export function jwtExpiry(token: string): string | undefined {
 export class ApiError extends Error {
   /**
    * `code` is the platform's own error code when it sent one (QUOTA_EXCEEDED,
-   * AGENT_PROJECT_RESTRICTED, NOT_AN_AGENT_PROJECT, PROJECT_PAUSED, …);
-   * `body` keeps structured fields such as QUOTA_EXCEEDED's upgradeUrl.
+   * CREDITS_EXHAUSTED, AGENT_PROJECT_RESTRICTED, NOT_AN_AGENT_PROJECT, PROJECT_PAUSED, …);
+   * `body` keeps structured fields such as QUOTA_EXCEEDED's upgradeUrl or
+   * CREDITS_EXHAUSTED's reason and buyUrl.
    */
   constructor(
     message: string,
@@ -240,6 +241,12 @@ export class Api {
       const code = typeof json?.code === 'string' ? json.code : undefined;
       if (code === 'QUOTA_EXCEEDED' && json?.upgradeUrl) msg += `\n  Upgrade: ${json.upgradeUrl}`;
       if (code === 'PROJECT_PAUSED') msg += '\n  Resume it with `nestcore projects resume <id|slug>` or upgrade your plan.';
+      if (code === 'CREDITS_EXHAUSTED') {
+        msg += json?.reason === 'spend_cap'
+          ? "\n  The workspace's monthly AI credit cap is reached. Raise or remove it with `nestcore credits cap <usd|off>`, add the project's own provider key, or wait for next month."
+          : "\n  The workspace has no AI credit left. Buy a pack with `nestcore credits buy <pack>` or add the project's own provider key.";
+        if (json?.buyUrl) msg += `\n  Buy credit: ${json.buyUrl}`;
+      }
       throw new ApiError(msg, res.status, code, json ?? undefined);
     }
     return json as T;

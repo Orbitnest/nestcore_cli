@@ -1,3 +1,4 @@
+import { spawn } from 'child_process';
 import { readFileSync, writeFileSync } from 'fs';
 import * as readline from 'readline';
 import {
@@ -669,6 +670,118 @@ async function cmdAi(rest: string[], flags: Record<string, string | boolean>) {
   fail(AI_USAGE);
 }
 
+// ── AI credit (workspace) ────────────────────────────────────────────────────
+const CREDITS_USAGE = 'Usage: nestcore credits [show] | credits buy <pack> [--open] | credits cap <usd|off>';
+
+/** Dollars with cents, keeping sub-cent amounts (single AI calls) readable. */
+const money = (n: unknown): string => {
+  if (n === null || n === undefined) return '—';
+  const v = Number(n);
+  const abs = Math.abs(v);
+  const s = abs === 0 || abs >= 0.01 ? `$${abs.toFixed(2)}` : usd(abs);
+  return v < 0 ? `-${s}` : s;
+};
+
+/** Open an https URL in the default browser without going through a shell. */
+function openInBrowser(url: string): boolean {
+  if (!/^https:\/\//i.test(url)) return false;
+  const [cmd, args] =
+    process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
+    : process.platform === 'darwin' ? ['open', [url]]
+    : ['xdg-open', [url]];
+  try {
+    const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    child.on('error', () => { /* no browser: the URL is printed anyway */ });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function showCreditSummary(c: any) {
+  heading('AI credit (workspace)');
+  table(
+    [
+      { item: 'balance', value: money(c.balanceUsd) },
+      { item: 'monthly cap', value: c.monthlyCapUsd === null || c.monthlyCapUsd === undefined ? 'none' : money(c.monthlyCapUsd) },
+      { item: 'spent this month', value: money(c.spentThisMonthUsd) },
+      { item: 'available now', value: c.available ? color.green('yes') : color.yellow('no') },
+      { item: 'margin', value: `${c.marginPct ?? 0}%` },
+    ],
+    ['item', 'value'],
+  );
+  if (!c.active) {
+    info("This workspace never bought credit, so it is never charged. Projects without their own provider key can't use the AI gateway until it does.");
+  } else if (!c.available) {
+    warn(c.balanceUsd <= 0
+      ? 'No credit left: buy a pack with `nestcore credits buy <pack>`.'
+      : 'The monthly cap is reached: raise or remove it with `nestcore credits cap <usd|off>`.');
+  }
+}
+
+async function cmdCredits(rest: string[], flags: Record<string, string | boolean>) {
+  const api = authed();
+  const sub = rest[0] ?? 'show';
+
+  if (sub === 'show') {
+    const c = await api.get<any>('/billing/credits');
+    showCreditSummary(c);
+    heading('Packs');
+    table(
+      (c.packs ?? []).map((p: any) => ({ pack: String(p.id), price: money(p.priceUsd), credit: money(p.creditsUsd) })),
+      ['pack', 'price', 'credit'],
+    );
+    const ledger: any[] = Array.isArray(c.ledger) ? c.ledger : [];
+    heading(`Recent activity (${ledger.length})`);
+    table(
+      ledger.map((l) => ({
+        time: shortTime(l.created_at),
+        kind: String(l.kind ?? ''),
+        amount: money(l.amount_usd),
+        description: String(l.description ?? ''),
+      })),
+      ['time', 'kind', 'amount', 'description'],
+    );
+    log(color.dim("\nCredit pays for AI calls of projects without their own provider key; a project's own key always wins."));
+    return;
+  }
+
+  if (sub === 'buy') {
+    const pack = rest[1];
+    if (!pack) {
+      const c = await api.get<any>('/billing/credits');
+      fail(`${CREDITS_USAGE}\n  Packs: ${(c.packs ?? []).map((p: any) => `${p.id} (${money(p.priceUsd)} → ${money(p.creditsUsd)} credit)`).join(', ')}`);
+    }
+    if (!/^[a-z0-9_-]{1,40}$/.test(pack)) fail(`"${pack}" is not a pack id. Run \`nestcore credits\` to see the packs.`);
+    const res = await api.post<any>('/billing/credits/checkout', { pack, ref: 'cli' });
+    if (!res?.url) fail('The API returned no checkout URL.');
+    info(`Checkout for ${color.bold(pack)}${res.pack?.priceUsd ? ` (${money(res.pack.priceUsd)})` : ''}. Open this link to pay with Stripe:`);
+    log(`  ${res.url}`);
+    if (flags.open === true && openInBrowser(res.url)) info('Opened it in your browser.');
+    log(color.dim('Nothing is charged until you pay. The credit shows up in `nestcore credits` once Stripe confirms the payment.'));
+    return;
+  }
+
+  if (sub === 'cap') {
+    const v = rest[1];
+    if (!v) fail(CREDITS_USAGE);
+    let cap: number | null;
+    if (['off', 'none', 'null'].includes(v.toLowerCase())) cap = null;
+    else {
+      if (!/^\d+(\.\d{1,2})?$/.test(v)) fail('The cap is a USD amount like 20 or 12.50, or "off" to remove it.');
+      cap = Number(v);
+      if (cap > 100_000) fail('The cap can be at most 100000 USD.');
+    }
+    const c = await api.put<any>('/billing/credits/cap', { monthlyCapUsd: cap });
+    success(cap === null ? 'Monthly AI credit cap removed.' : `Monthly AI credit cap set to ${money(cap)}.`);
+    showCreditSummary(c);
+    return;
+  }
+
+  fail(CREDITS_USAGE);
+}
+
 // ── help ─────────────────────────────────────────────────────────────────────
 function printHelp() {
   log(`${color.bold('nestcore')} ${color.dim('v' + VERSION)} — NestCore platform CLI
@@ -723,6 +836,11 @@ ${color.bold('AI')}
   ai traces [--limit n] [--status ok|error]
                                         Recent model calls: tokens, cost, latency
 
+${color.bold('AI credit (workspace)')}
+  credits                               Balance, monthly cap, this month's spend, packs, recent activity
+  credits buy <pack> [--open]           Stripe Checkout link for a credit pack (--open: open it in the browser)
+  credits cap <usd|off>                 Set or remove the monthly cap on credit spend
+
 ${color.bold('Options')}
   -p, --project <id>    Target project (overrides the linked one)
   -d, --dir <path>      Migrations directory (default: migrations)
@@ -768,6 +886,7 @@ async function main() {
     case 'sms': return cmdSms(rest, flags);
     case 'auth-security': return cmdAuthSecurity(rest, flags);
     case 'ai': return cmdAi(rest, flags);
+    case 'credits': return cmdCredits(rest, flags);
     case 'gen':
       if (rest[0] === 'types') return cmdGenTypes(flags);
       return fail('Usage: nestcore gen types');
