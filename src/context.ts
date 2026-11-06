@@ -153,7 +153,17 @@ export function jwtExpiry(token: string): string | undefined {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, public readonly status: number) {
+  /**
+   * `code` is the platform's own error code when it sent one (QUOTA_EXCEEDED,
+   * AGENT_PROJECT_RESTRICTED, NOT_AN_AGENT_PROJECT, PROJECT_PAUSED, …);
+   * `body` keeps structured fields such as QUOTA_EXCEEDED's upgradeUrl.
+   */
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly code?: string,
+    public readonly body?: Record<string, any>,
+  ) {
     super(message);
   }
 }
@@ -227,7 +237,10 @@ export class Api {
           '. Raw SQL (incl. migrations, db reset, gen types, db diff), dropping tables, RLS toggles and policy ' +
           'changes are limited to the user who created the project. Ask the project owner to run this.';
       }
-      throw new ApiError(msg, res.status);
+      const code = typeof json?.code === 'string' ? json.code : undefined;
+      if (code === 'QUOTA_EXCEEDED' && json?.upgradeUrl) msg += `\n  Upgrade: ${json.upgradeUrl}`;
+      if (code === 'PROJECT_PAUSED') msg += '\n  Resume it with `nestcore projects resume <id|slug>` or upgrade your plan.';
+      throw new ApiError(msg, res.status, code, json ?? undefined);
     }
     return json as T;
   }

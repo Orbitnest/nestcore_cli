@@ -205,12 +205,40 @@ async function cmdWhoami() {
   }
 }
 
-async function cmdProjects() {
-  const projects = listFrom(await authed().get<any>('/projects'));
+const PROJECT_KINDS = ['app', 'agent'];
+
+async function cmdProjects(rest: string[], flags: Record<string, string | boolean>) {
+  const sub = rest[0];
+  if (sub === 'eligibility') {
+    const kind = rest[1] || str(flags, 'kind') || 'app';
+    if (!PROJECT_KINDS.includes(kind)) fail('Usage: nestcore projects eligibility [app|agent]');
+    const e = await authed().get<any>('/projects/eligibility', { kind });
+    if (e.allowed) success(`You can create ${kind === 'agent' ? 'an agent' : 'an app'} project (${e.plan} plan, ${e.used}/${e.limit ?? '∞'}).`);
+    else warn(`No room for ${kind === 'agent' ? 'an agent' : 'an app'} project on the ${e.plan} plan (${e.used}/${e.limit}). Upgrade: ${e.upgradeUrl}`);
+    return;
+  }
+  if (sub === 'pause' || sub === 'resume') {
+    const ref = rest[1];
+    if (!ref) fail(`Usage: nestcore projects ${sub} <id|slug>`);
+    const match = matchProject(listFrom(await authed().get<any>('/projects')), ref);
+    await authed().post<any>(`/projects/${encodeURIComponent(match.id)}/status`, { status: sub === 'pause' ? 'paused' : 'active' });
+    success(`${sub === 'pause' ? 'Paused' : 'Resumed'} ${color.bold(match.name)}.`);
+    return;
+  }
+  if (sub && sub !== 'list') fail('Usage: nestcore projects [list|eligibility|pause|resume] [--kind app|agent]');
+  const kind = str(flags, 'kind') || undefined;
+  if (kind && !PROJECT_KINDS.includes(kind)) fail('--kind must be app or agent');
+  const projects = listFrom(await authed().get<any>('/projects', { kind }));
   heading(`Projects (${projects.length})`);
   table(
-    projects.map((p) => ({ name: String(p.name ?? ''), slug: String(p.slug ?? ''), id: String(p.id ?? '') })),
-    ['name', 'slug', 'id'],
+    projects.map((p) => ({
+      name: String(p.name ?? ''),
+      slug: String(p.slug ?? ''),
+      kind: String(p.kind ?? 'app'),
+      status: String(p.status ?? 'active'),
+      id: String(p.id ?? ''),
+    })),
+    ['name', 'slug', 'kind', 'status', 'id'],
   );
 }
 
@@ -654,7 +682,11 @@ ${color.bold('Auth')}
   whoami                Show the current session
 
 ${color.bold('Projects')}
-  projects              List your projects
+  projects              List your projects with kind and status (--kind app|agent)
+  projects eligibility [app|agent]
+                        Can you create one more project of a kind? (shows the upgrade link)
+  projects pause|resume <id|slug>
+                        Pause a project (nothing is deleted) or resume it
   link <id|slug>        Link the current directory to a project (.nestcore/config.json)
 
 ${color.bold('Database & migrations')}
@@ -716,7 +748,7 @@ async function main() {
     case 'login': return cmdLogin(flags);
     case 'logout': return cmdLogout();
     case 'whoami': return cmdWhoami();
-    case 'projects': return cmdProjects();
+    case 'projects': return cmdProjects(rest, flags);
     case 'link': return cmdLink(rest);
     case 'migration':
       if (rest[0] === 'new') return cmdMigrationNew(rest.slice(1), flags);
