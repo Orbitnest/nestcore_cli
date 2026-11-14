@@ -11,6 +11,7 @@ import {
   loadCredentials,
   loadLink,
   matchProject,
+  parseBranch,
   resolveProjectId,
   saveCredentials,
   saveLink,
@@ -34,7 +35,7 @@ const VERSION: string = pkg.version;
 
 // ── arg parsing ──────────────────────────────────────────────────────────────
 const ALIAS: Record<string, string> = {
-  o: 'out', f: 'file', p: 'project', d: 'dir', h: 'help', v: 'version', e: 'email',
+  o: 'out', f: 'file', p: 'project', d: 'dir', h: 'help', v: 'version', e: 'email', b: 'branch',
 };
 
 function parseArgs(argv: string[]): { positionals: string[]; flags: Record<string, string | boolean> } {
@@ -243,14 +244,16 @@ async function cmdProjects(rest: string[], flags: Record<string, string | boolea
   );
 }
 
-async function cmdLink(positionals: string[]) {
+async function cmdLink(positionals: string[], flags: Record<string, string | boolean>) {
   const ref = positionals[0];
+  const branch = parseBranch(str(flags, 'branch'));
   const projects = listFrom(await authed().get<any>('/projects'));
+  const branchNote = branch === 'development' ? ` on the ${color.bold('development')} branch` : '';
   if (!ref) {
     if (projects.length === 1) {
       const p = projects[0];
-      saveLink({ projectId: p.id, projectSlug: p.slug, name: p.name, apiUrl: apiUrl() });
-      success(`Linked to ${color.bold(p.name)} (${p.slug}).`);
+      saveLink({ projectId: p.id, projectSlug: p.slug, name: p.name, apiUrl: apiUrl(), ...(branch ? { branch } : {}) });
+      success(`Linked to ${color.bold(p.name)} (${p.slug})${branchNote}.`);
       return;
     }
     heading('Specify a project to link: `nestcore link <id|slug>`');
@@ -258,8 +261,9 @@ async function cmdLink(positionals: string[]) {
     return;
   }
   const match = matchProject(projects, ref);
-  saveLink({ projectId: match.id, projectSlug: match.slug, name: match.name, apiUrl: apiUrl() });
-  success(`Linked this directory to ${color.bold(match.name)} (${match.slug}).`);
+  saveLink({ projectId: match.id, projectSlug: match.slug, name: match.name, apiUrl: apiUrl(), ...(branch ? { branch } : {}) });
+  success(`Linked this directory to ${color.bold(match.name)} (${match.slug})${branchNote}.`);
+  if (branch === 'development') log(color.dim('  Commands now target Development; pass --branch production to reach the live project.'));
   log(color.dim('  Wrote .nestcore/config.json'));
 }
 
@@ -273,7 +277,7 @@ function cmdMigrationNew(positionals: string[], flags: Record<string, string | b
 
 async function cmdDbPush(flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const dir = str(flags, 'dir') || 'migrations';
   const sql = sqlRunner(api, id);
   const res = await mig.push(sql, dir);
@@ -283,7 +287,7 @@ async function cmdDbPush(flags: Record<string, string | boolean>) {
 
 async function cmdDbStatus(flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const dir = str(flags, 'dir') || 'migrations';
   const entries = await mig.status(sqlRunner(api, id), dir);
   heading(`Migrations (${entries.filter((e) => e.applied).length}/${entries.length} applied)`);
@@ -305,7 +309,7 @@ async function cmdDbStatus(flags: Record<string, string | boolean>) {
 
 async function cmdDbRollback(positionals: string[], flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const dir = str(flags, 'dir') || 'migrations';
   const rolled = await mig.rollback(sqlRunner(api, id), dir, positionals[0]);
   success(`Rolled back migration ${color.bold(rolled)}.`);
@@ -313,7 +317,7 @@ async function cmdDbRollback(positionals: string[], flags: Record<string, string
 
 async function cmdDbReset(flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const dir = str(flags, 'dir') || 'migrations';
   if (!flags.yes && !flags.force) {
     fail('`db reset` DROPS every table in your project and re-runs all migrations. Re-run with --yes to confirm.');
@@ -328,7 +332,7 @@ async function cmdDbReset(flags: Record<string, string | boolean>) {
 
 async function cmdDbSql(positionals: string[], flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const file = str(flags, 'file');
   const sqlText = file ? readFileSync(file, 'utf8') : positionals.join(' ');
   if (!sqlText.trim()) fail('Usage: nestcore db sql "<SQL>"  (or --file <path>)');
@@ -339,7 +343,7 @@ async function cmdDbSql(positionals: string[], flags: Record<string, string | bo
 
 async function cmdGenTypes(flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const ts = await generateTypes(sqlRunner(api, id));
   if (flags.stdout) { process.stdout.write(ts); return; }
   const out = str(flags, 'out') || 'nestcore.types.ts';
@@ -349,7 +353,7 @@ async function cmdGenTypes(flags: Record<string, string | boolean>) {
 
 async function cmdDbDiff(flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const current = await introspectSchema(sqlRunner(api, id));
 
   // `--save` captures the live schema as the new baseline.
@@ -390,7 +394,7 @@ async function cmdDbDiff(flags: Record<string, string | boolean>) {
 
 async function cmdDbConnect(flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   let res: any;
   try {
     res = await api.get<any>(`/admin/projects/${encodeURIComponent(id)}/connection`);
@@ -423,7 +427,7 @@ async function cmdDbConnect(flags: Record<string, string | boolean>) {
 
 async function cmdWebhooks(rest: string[], flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const base = `/admin/projects/${encodeURIComponent(id)}/webhooks`;
   const sub = rest[0] ?? 'list';
   if (sub === 'list') {
@@ -474,7 +478,7 @@ const AUTH_SECURITY_FLAGS: Array<[string, string, string, string]> = [
 
 async function cmdAuthSecurity(rest: string[], flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const base = `/projects/${encodeURIComponent(id)}/auth-settings`;
   const sub = rest[0] ?? 'get';
   const show = (limits: Record<string, number>) => {
@@ -503,7 +507,7 @@ async function cmdAuthSecurity(rest: string[], flags: Record<string, string | bo
 
 async function cmdSms(rest: string[], flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const base = `/admin/projects/${encodeURIComponent(id)}/sms-config`;
   const sub = rest[0] ?? 'get';
   if (sub === 'get') {
@@ -568,7 +572,7 @@ function showEmbeddings(cols: any[]) {
 
 async function cmdAi(rest: string[], flags: Record<string, string | boolean>) {
   const api = authed();
-  const { id } = await resolveProjectId(api, str(flags, 'project'));
+  const { id } = await resolveProjectId(api, str(flags, 'project'), str(flags, 'branch'));
   const pid = encodeURIComponent(id);
   const area = rest[0] ?? 'overview';
 
@@ -801,6 +805,19 @@ ${color.bold('Projects')}
   projects pause|resume <id|slug>
                         Pause a project (nothing is deleted) or resume it
   link <id|slug>        Link the current directory to a project (.nestcore/config.json)
+                        --branch development: work on the Development branch by default
+
+${color.bold('Branches (Production + Development)')}
+  branches              Production and Development: status, sizes, changes to promote
+  branches create       Create the Development branch (schema + config, no data)
+  branches reset --yes  Rebuild Development from Production (deletes its data, users, files)
+  branches changes      Schema changes recorded on Development, not yet promoted
+  branches discard <id…> Drop recorded changes so they are never promoted
+  branches promote      Preview what would be promoted to Production
+  branches promote --yes [--confirm-destructive] [--acknowledge-drift] [--env] [--auth-settings]
+                        Apply it (admin): schema in one transaction, then functions,
+                        buckets, new jobs (off); --env adds missing env vars
+  branches delete --yes Delete the Development branch (admin)
 
 ${color.bold('Database & migrations')}
   migration new <name>  Scaffold a new migration file (NNN_name.sql)
@@ -843,6 +860,7 @@ ${color.bold('AI credit (workspace)')}
 
 ${color.bold('Options')}
   -p, --project <id>    Target project (overrides the linked one)
+  -b, --branch <name>   production | development (overrides the linked branch)
   -d, --dir <path>      Migrations directory (default: migrations)
   -o, --out <file>      Output file for gen types
       --url <url>       API base URL for login (default: https://api.nestcore.io)
@@ -852,6 +870,113 @@ ${color.bold('Options')}
 
 ${color.dim('Migrations run DDL via the admin SQL endpoint. Files may include a')}
 ${color.dim('`-- migrate:down` section for rollback.')}`);
+}
+
+// ── branches ─────────────────────────────────────────────────────────────────
+
+const human = (n: unknown): string => {
+  const v = Number(n);
+  if (n == null || !Number.isFinite(v)) return '—';
+  if (v < 1024 * 1024) return `${Math.round(v / 1024)} KB`;
+  return `${(v / 1024 / 1024).toFixed(1)} MB`;
+};
+
+async function cmdBranches(rest: string[], flags: Record<string, string | boolean>) {
+  const api = authed();
+  // Branch commands always address the project; --branch is not needed here.
+  const { id } = await resolveProjectId(api, str(flags, 'project'), 'production');
+  const base = `/projects/${id}/branches`;
+  const data = <T>(r: any): T => (r?.data ?? r) as T;
+  const sub = rest[0] ?? 'list';
+
+  if (sub === 'list' || sub === 'ls') {
+    const list = data<any>(await api.get(base));
+    if (!list?.branches?.length) fail('Branches are not available for this project.');
+    table(
+      list.branches.map((b: any) => ({
+        branch: b.branch === 'development' ? color.yellow('development') : color.green('production'),
+        slug: String(b.slug),
+        status: String(b.provisioning_status),
+        database: human(b.database_bytes),
+        files: human(b.storage_bytes),
+        'to promote': b.branch === 'development' ? String(b.pending_changes) : '',
+        id: String(b.id),
+      })),
+      ['branch', 'slug', 'status', 'database', 'files', 'to promote', 'id'],
+    );
+    if (!list.branches.some((b: any) => b.branch === 'development')) info('No Development branch yet: `nestcore branches create`.');
+    return;
+  }
+  if (sub === 'create') {
+    info('Creating the Development branch (copies schema and config, not data)…');
+    const b = data<any>(await api.post(`${base}/development`, {}));
+    success(`Development branch ready: ${color.bold(b.slug)}`);
+    log(color.dim(`  URL: ${b.project_url}`));
+    log(color.dim('  Use it: `nestcore link <project> --branch development`, or pass --branch development.'));
+    return;
+  }
+  if (sub === 'reset') {
+    if (!flags.yes) fail('Reset deletes every row, end user and file on Development and rebuilds it from Production. Re-run with --yes.');
+    info('Rebuilding Development from Production…');
+    const b = data<any>(await api.post(`${base}/development/reset`, { confirm: true }));
+    success(`Development reset (${b.slug}).`);
+    return;
+  }
+  if (sub === 'delete') {
+    if (!flags.yes) fail('Deleting removes the Development database, users, files and keys. Re-run with --yes.');
+    await api.del(`${base}/development`);
+    success('Development branch deleted.');
+    return;
+  }
+  if (sub === 'changes') {
+    const changes = data<any[]>(await api.get(`${base}/development/changes`));
+    if (!changes.length) { info('No schema changes waiting to be promoted.'); return; }
+    for (const c of changes) {
+      log(`${color.dim(String(c.seq).padStart(3))} ${c.destructive ? color.red('!') : ' '} ${c.statement}`);
+      log(color.dim(`      ${c.source} · ${c.id}`));
+    }
+    return;
+  }
+  if (sub === 'discard') {
+    const ids = rest.slice(1);
+    if (!ids.length) fail('Usage: nestcore branches discard <change-id…>');
+    const r = data<any>(await api.post(`${base}/development/changes/discard`, { ids }));
+    success(`Discarded ${r.discarded} change(s).`);
+    return;
+  }
+  if (sub === 'promote') {
+    const p = data<any>(await api.get(`${base}/development/promote`));
+    heading(`Promote Development → Production (${p.production_name})`);
+    if (p.drift?.changed) warn("Production's schema changed since Development was created, reset or last promoted.");
+    if (p.changes.length) {
+      log(color.bold('Schema changes (one transaction):'));
+      for (const c of p.changes) log(`  ${c.destructive ? color.red('! ') : '  '}${c.statement}`);
+    }
+    const cfg = p.config;
+    if (cfg.functions.length) log(`${color.bold('Functions:')} ${cfg.functions.map((f: any) => `${f.name} (${f.status})`).join(', ')}`);
+    if (cfg.buckets.length) log(`${color.bold('Buckets:')} ${cfg.buckets.map((b: any) => b.name).join(', ')}`);
+    const newJobs = cfg.jobs.filter((j: any) => j.status === 'new');
+    if (cfg.jobs.length) log(`${color.bold('Jobs:')} ${cfg.jobs.map((j: any) => `${j.name} (${j.status === 'new' ? 'new, created off' : 'changed, update by hand'})`).join(', ')}`);
+    if (cfg.env_vars.length) log(`${color.bold('Env vars missing on Production:')} ${cfg.env_vars.map((e: any) => e.name).join(', ')} ${flags.env ? '' : color.dim('(not included; add --env)')}`);
+    if (cfg.auth_settings.changed) log(`${color.bold('Auth settings differ')} ${flags['auth-settings'] ? '' : color.dim('(not included; add --auth-settings)')}`);
+    const empty = !p.changes.length && !cfg.functions.length && !cfg.buckets.length && !newJobs.length
+      && !(flags.env && cfg.env_vars.length) && !(flags['auth-settings'] && cfg.auth_settings.changed);
+    if (empty) { info('Nothing to promote.'); return; }
+    if (!flags.yes) { info('Preview only. Re-run with --yes to apply.'); return; }
+    const res = data<any>(await api.post(`${base}/development/promote`, {
+      change_ids: p.changes.map((c: any) => c.id),
+      functions: cfg.functions.map((f: any) => f.name),
+      buckets: cfg.buckets.map((b: any) => b.name),
+      jobs: newJobs.map((j: any) => j.name),
+      env_vars: flags.env ? cfg.env_vars.map((e: any) => e.name) : [],
+      auth_settings: !!flags['auth-settings'],
+      confirm_destructive: !!flags['confirm-destructive'],
+      acknowledge_drift: !!flags['acknowledge-drift'],
+    }));
+    success(`Promoted to Production: ${JSON.stringify(res.summary)}`);
+    return;
+  }
+  fail('Usage: nestcore branches [list|create|reset|changes|discard|promote|delete]');
 }
 
 // ── main ─────────────────────────────────────────────────────────────────────
@@ -867,7 +992,9 @@ async function main() {
     case 'logout': return cmdLogout();
     case 'whoami': return cmdWhoami();
     case 'projects': return cmdProjects(rest, flags);
-    case 'link': return cmdLink(rest);
+    case 'link': return cmdLink(rest, flags);
+    case 'branches':
+    case 'branch': return cmdBranches(rest, flags);
     case 'migration':
       if (rest[0] === 'new') return cmdMigrationNew(rest.slice(1), flags);
       return fail('Usage: nestcore migration new <name>');

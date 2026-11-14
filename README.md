@@ -53,7 +53,32 @@ nestcore gen types              # → nestcore.types.ts
 | Command | Description |
 | --- | --- |
 | `nestcore projects` | List your projects (name, slug, id). |
-| `nestcore link [id\|slug\|name]` | Link the current directory to a project. With no argument and a single project, links it automatically; otherwise lists choices. Writes `.nestcore/config.json`. |
+| `nestcore link [id\|slug\|name]` | Link the current directory to a project. With no argument and a single project, links it automatically; otherwise lists choices. Writes `.nestcore/config.json`. Add `--branch development` to make Development the default for this directory. |
+
+### Branches
+
+Every App project has a **Production** branch (the live project) and a **Development** branch: a copy of Production's schema and config (tables, RLS, functions, buckets, auth settings) with its own data, end users, URL and keys. Schema changes you make on Development are recorded and can be promoted to Production.
+
+| Command | Description |
+| --- | --- |
+| `nestcore branches` | Production and Development: status, database and file sizes, changes waiting to be promoted. |
+| `nestcore branches create` | Create the Development branch (schema + config, no data). |
+| `nestcore branches reset --yes` | Rebuild Development from Production. Deletes its rows, end users and files; keeps its URL, keys, env vars and functions. |
+| `nestcore branches changes` | Schema changes recorded on Development and not promoted yet (`!` = can lose data). |
+| `nestcore branches discard <id…>` | Drop recorded changes so they are never promoted. |
+| `nestcore branches promote` | Preview what would be promoted. |
+| `nestcore branches promote --yes` | Promote (workspace admins). Schema changes run in one transaction on Production; then functions, new buckets and new jobs (created off). Add `--env` for missing env vars, `--auth-settings` to copy auth settings, `--confirm-destructive` for DROP / RENAME / type changes, `--acknowledge-drift` if Production changed meanwhile. |
+| `nestcore branches delete --yes` | Delete the Development branch (workspace admins). |
+
+Target a branch on any command with `--branch production` or `--branch development` (`-b`, also `prod` / `dev`), or link the directory with `--branch`. A typical flow:
+
+```bash
+nestcore link my-app --branch development
+nestcore db push                 # migrations go to Development
+nestcore gen types
+nestcore branches promote        # review
+nestcore branches promote --yes  # apply to Production
+```
 
 ### Database & migrations
 
@@ -110,7 +135,8 @@ prints which one, the next step and the buy link.
 
 | Option | Applies to | Description |
 | --- | --- | --- |
-| `-p, --project <id\|slug>` | db / gen / webhooks / sms / auth-security / ai | Target a specific project, overriding the linked one. |
+| `-p, --project <id\|slug>` | db / gen / webhooks / sms / auth-security / ai / branches | Target a specific project, overriding the linked one. |
+| `-b, --branch <name>` | db / gen / webhooks / sms / auth-security / ai | `production` or `development` (`prod` / `dev`), overriding the linked branch. |
 | `-d, --dir <path>` | migration / db | Migrations directory (default `migrations`). |
 | `-o, --out <file>` | gen types | Output file. |
 | `--stdout` | gen types | Print to stdout instead of a file. |
@@ -186,7 +212,7 @@ Raw SQL (`db sql`, `db push`/`status`/`rollback`/`reset`, `gen types`, `db diff`
 | Path | Scope | Contents |
 | --- | --- | --- |
 | `~/.nestcore/credentials.json` | global, `0600` | Access/refresh tokens, API URL, user. Shared with the NestCore MCP server; token refreshes are serialised through `~/.nestcore/credentials.lock`. |
-| `./.nestcore/config.json` | per-directory | Linked `projectId`, `projectSlug`, `name`, `apiUrl` (same file the MCP server reads; older files with `slug` still work). Safe to commit. |
+| `./.nestcore/config.json` | per-directory | Linked `projectId`, `projectSlug`, `name`, `apiUrl` and optional `branch` (same file the MCP server reads; older files with `slug` still work). Safe to commit. |
 
 Environment variables (override stored values):
 

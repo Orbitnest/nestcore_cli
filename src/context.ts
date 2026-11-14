@@ -47,6 +47,19 @@ export interface ProjectLink {
   projectSlug?: string;
   name?: string;
   apiUrl?: string;
+  /** Branch the directory works on: `production` (default) or `development`. */
+  branch?: Branch;
+}
+
+export type Branch = 'production' | 'development';
+
+/** `--branch` value → canonical branch name (accepts prod / dev). */
+export function parseBranch(value: string | undefined): Branch | undefined {
+  if (value === undefined) return undefined;
+  const v = value.toLowerCase();
+  if (v === 'production' || v === 'prod' || v === 'main') return 'production';
+  if (v === 'development' || v === 'dev') return 'development';
+  fail(`Unknown branch "${value}". Use production or development.`);
 }
 
 export function loadCredentials(): Credentials {
@@ -114,7 +127,7 @@ export function loadLink(): ProjectLink | null {
     const file = existsSync(LINK_FILE) || !existsSync(LEGACY_LINK_FILE) ? LINK_FILE : LEGACY_LINK_FILE;
     const raw = JSON.parse(readFileSync(file, 'utf8'));
     if (!raw?.projectId) return null;
-    return { projectId: raw.projectId, projectSlug: raw.projectSlug ?? raw.slug, name: raw.name, apiUrl: raw.apiUrl };
+    return { projectId: raw.projectId, projectSlug: raw.projectSlug ?? raw.slug, name: raw.name, apiUrl: raw.apiUrl, branch: raw.branch };
   } catch {
     return null;
   }
@@ -241,6 +254,9 @@ export class Api {
       const code = typeof json?.code === 'string' ? json.code : undefined;
       if (code === 'QUOTA_EXCEEDED' && json?.upgradeUrl) msg += `\n  Upgrade: ${json.upgradeUrl}`;
       if (code === 'PROJECT_PAUSED') msg += '\n  Resume it with `nestcore projects resume <id|slug>` or upgrade your plan.';
+      if (code === 'DESTRUCTIVE_CHANGES') msg += '\n  Re-run with --confirm-destructive, or drop those changes with `nestcore branches discard <id>`.';
+      if (code === 'PRODUCTION_DRIFT') msg += '\n  Review `nestcore branches promote`, then re-run with --acknowledge-drift.';
+      if (code === 'PROMOTE_FAILED' && json?.failed_change?.statement) msg += `\n  Failed statement: ${json.failed_change.statement}`;
       if (code === 'CREDITS_EXHAUSTED') {
         msg += json?.reason === 'spend_cap'
           ? "\n  The workspace's monthly AI credit cap is reached. Raise or remove it with `nestcore credits cap <usd|off>`, add the project's own provider key, or wait for next month."
@@ -324,22 +340,46 @@ export function matchProject(projects: any[], ref: string): any {
 }
 
 /**
- * Resolve the active project id: `--project` flag → linked project → error.
- * A flag value may be a UUID (used as-is) or a slug/name (resolved to its id
- * via the projects list — the SQL endpoint requires a UUID).
+ * Resolve the active project id: `--project` flag → linked project → error,
+ * then the branch: `--branch` flag → linked branch → production. A flag value
+ * may be a UUID (used as-is) or a slug/name (resolved to its id via the
+ * projects list — the SQL endpoint requires a UUID).
  */
 export async function resolveProjectId(
   api: Api,
   flagProject?: string,
-): Promise<{ id: string; slug?: string }> {
-  if (flagProject) {
-    if (UUID_RE.test(flagProject)) return { id: flagProject };
-    const res = await api.get<any>('/projects');
-    const projects: any[] = Array.isArray(res) ? res : (res?.data ?? res?.projects ?? []);
-    const match = matchProject(projects, flagProject);
-    return { id: match.id, slug: match.slug };
-  }
+  flagBranch?: string,
+): Promise<{ id: string; slug?: string; branch: Branch }> {
   const link = loadLink();
-  if (link) return { id: link.projectId, slug: link.projectSlug };
-  fail('No project selected. Run `nestcore link <project>` or pass `--project <id|slug>`.');
+  const branch = parseBranch(flagBranch) ?? (flagProject ? undefined : link?.branch) ?? 'production';
+  let base: { id: string; slug?: string };
+  if (flagProject) {
+    if (UUID_RE.test(flagProject)) base = { id: flagProject };
+    else {
+      const res = await api.get<any>('/projects');
+      const projects: any[] = Array.isArray(res) ? res : (res?.data ?? res?.projects ?? []);
+      const match = matchProject(projects, flagProject);
+      base = { id: match.id, slug: match.slug };
+    }
+  } else if (link) {
+    base = { id: link.projectId, slug: link.projectSlug };
+  } else {
+    fail('No project selected. Run `nestcore link <project>` or pass `--project <id|slug>`.');
+  }
+  return { ...(await resolveBranch(api, base.id, branch, base.slug)), branch };
+}
+
+/** The id/slug of `branch` for a project (or branch) id. */
+export async function resolveBranch(api: Api, projectId: string, branch: Branch, slug?: string): Promise<{ id: string; slug?: string }> {
+  const res = await api.get<any>(`/projects/${projectId}/branches`).catch(() => null);
+  const list = res?.data ?? res;
+  const rows: any[] = list?.branches ?? [];
+  if (!rows.length) {
+    if (branch === 'development') fail('Branches are not available for this project (Agent project or older API).');
+    return { id: projectId, slug };
+  }
+  const row = rows.find((b) => b.branch === branch);
+  if (!row) fail('This project has no Development branch yet. Run `nestcore branches create`.');
+  if (row.provisioning_status !== 'ready') fail(`The ${branch} branch is ${row.provisioning_status}. Try again in a moment.`);
+  return { id: row.id, slug: row.slug };
 }
