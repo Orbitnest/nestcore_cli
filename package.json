@@ -1,6 +1,6 @@
 {
   "name": "@nestcorehq/cli",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Command-line interface for the NestCore platform — auth, projects, migrations, type generation, and SQL.",
   "bin": {
     "nestcore": "dist/index.js",
@@ -20,7 +20,7 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node test/credits.mjs",
+    "test": "npm run build && node test/credits.mjs && node test/api-origin.mjs",
     "start": "node dist/index.js"
   },
   "keywords": [

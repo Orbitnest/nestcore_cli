@@ -23,7 +23,8 @@ const LEGACY_CRED_FILE = join(homedir(), '.orbitnest', 'credentials.json');
 // across processes (the API revokes every session when a consumed token is replayed).
 const CRED_LOCK = join(CRED_DIR, 'credentials.lock');
 
-// Per-directory project link — safe to commit.
+// Per-directory project link — safe to commit. Its `apiUrl` is informational
+// only: requests always go to apiUrl() (env → credentials → default).
 const LINK_DIR = resolve('.nestcore');
 const LINK_FILE = join(LINK_DIR, 'config.json');
 // Pre-rename link written by CLI < 0.8; read when the new one is absent.
@@ -144,13 +145,53 @@ export function saveLink(link: ProjectLink): void {
 
 const stripSlash = (u: string) => u.replace(/\/+$/, '');
 
-/** Resolve the API base URL: env → linked project → credentials → default. */
+/**
+ * Resolve the API base URL: NESTCORE_API_URL → the API you logged in to
+ * (credentials) → default. Never the per-directory link: .nestcore/config.json
+ * is repository content (safe to commit), so a cloned repo must not decide
+ * where your tokens and password are sent. See checkLinkedApi().
+ */
 export function apiUrl(): string {
-  return stripSlash(
-    envVar('API_URL') ||
-      loadLink()?.apiUrl ||
-      loadCredentials().apiUrl ||
-      DEFAULT_API,
+  return stripSlash(envVar('API_URL') || loadCredentials().apiUrl || DEFAULT_API);
+}
+
+/** NestCore's own API hosts (the pre-rename one still serves); interchangeable in a link. */
+const OFFICIAL_API_HOSTS = new Set(['api.nestcore.io', 'api.orbitnest.io']);
+
+/** Same API base URL, ignoring case and trailing slashes; the official hosts match each other. */
+export function sameApi(a: string, b: string): boolean {
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    const official = ua.protocol === 'https:' && ub.protocol === 'https:'
+      && OFFICIAL_API_HOSTS.has(ua.host) && OFFICIAL_API_HOSTS.has(ub.host);
+    return (official || ua.origin === ub.origin) && stripSlash(ua.pathname) === stripSlash(ub.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/** Printable form of an untrusted value (no terminal control sequences). */
+const printable = (v: unknown) => String(v).replace(/[\u0000-\u001f\u007f-\u009f]/g, '?');
+
+/**
+ * Refuse to run an authenticated command when this directory's link names a
+ * different API than the one the session belongs to. The session is never sent
+ * to the link's host anyway; this stops the CLI acting on a project id from
+ * another deployment and says how to opt in explicitly. With NESTCORE_API_URL
+ * set, the user already chose the host, so a mismatch is only a warning.
+ */
+export function checkLinkedApi(base: string): void {
+  const linked = loadLink()?.apiUrl;
+  if (!linked || sameApi(linked, base)) return;
+  if (envVar('API_URL')) {
+    console.error(`! .nestcore/config.json names API ${printable(linked)}; using NESTCORE_API_URL ${printable(base)}.`);
+    return;
+  }
+  fail(
+    `This directory's .nestcore/config.json names API ${printable(linked)}, but you are signed in to ${printable(base)}.\n` +
+      '  The CLI only sends your session to the API you logged in to, never to a host named in a project file.\n' +
+      '  If you trust that API, sign in to it with `nestcore login --url <url>` (or set NESTCORE_API_URL), or re-link with `nestcore link`.',
   );
 }
 
@@ -282,11 +323,17 @@ export class Api {
   }
 }
 
-/** An API client authenticated with the stored token, or exit with guidance. */
-export function authed(): Api {
+/**
+ * An API client authenticated with the stored token, or exit with guidance.
+ * `skipLinkCheck` is for commands that never use the directory's link (login
+ * state, re-linking); the client still talks only to apiUrl().
+ */
+export function authed(opts: { skipLinkCheck?: boolean } = {}): Api {
   const creds = loadCredentials();
   if (!creds.access_token) fail('Not logged in. Run `nestcore login` first.');
-  return new Api(apiUrl(), creds.access_token, refreshAccessToken);
+  const base = apiUrl();
+  if (!opts.skipLinkCheck) checkLinkedApi(base);
+  return new Api(base, creds.access_token, refreshAccessToken);
 }
 
 /**

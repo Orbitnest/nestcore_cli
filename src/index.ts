@@ -182,7 +182,7 @@ async function cmdLogout() {
       // The access token is usually expired (15 min); this call refreshes it
       // through the shared refresher. Signout then sends the CURRENT refresh
       // token — a rotated-away one would match no session and revoke nothing.
-      const api = authed();
+      const api = authed({ skipLinkCheck: true });
       await api.get('/auth/profile');
       await api.post('/auth/signout', { refresh_token: loadCredentials().refresh_token });
     } catch (e) {
@@ -197,7 +197,7 @@ async function cmdWhoami() {
   const creds = loadCredentials();
   if (!creds.access_token) { warn('Not logged in. Run `nestcore login`.'); return; }
   try {
-    const me = await authed().get<any>('/auth/profile');
+    const me = await authed({ skipLinkCheck: true }).get<any>('/auth/profile');
     const u = me.user ?? me.data ?? me;
     success(`Logged in as ${color.bold(u.email ?? creds.user?.email ?? 'unknown')}`);
     log(color.dim(`  API: ${apiUrl()}`));
@@ -247,7 +247,7 @@ async function cmdProjects(rest: string[], flags: Record<string, string | boolea
 async function cmdLink(positionals: string[], flags: Record<string, string | boolean>) {
   const ref = positionals[0];
   const branch = parseBranch(str(flags, 'branch'));
-  const projects = listFrom(await authed().get<any>('/projects'));
+  const projects = listFrom(await authed({ skipLinkCheck: true }).get<any>('/projects'));
   const branchNote = branch === 'development' ? ` on the ${color.bold('development')} branch` : '';
   if (!ref) {
     if (projects.length === 1) {
@@ -686,15 +686,24 @@ const money = (n: unknown): string => {
   return v < 0 ? `-${s}` : s;
 };
 
-/** Open an https URL in the default browser without going through a shell. */
+/**
+ * Open an https URL in the default browser without going through a shell. The
+ * URL comes from the API, so anything that is not a plain https URL (control
+ * characters, whitespace, quotes, shell metacharacters) is only printed.
+ */
 function openInBrowser(url: string): boolean {
-  if (!/^https:\/\//i.test(url)) return false;
+  if (!/^https:\/\//i.test(url) || /[\u0000- \u007f-\u009f"<>^`{|}\\]/.test(url)) return false;
+  try {
+    if (new URL(url).protocol !== 'https:') return false;
+  } catch {
+    return false;
+  }
   const [cmd, args] =
     process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
     : process.platform === 'darwin' ? ['open', [url]]
     : ['xdg-open', [url]];
   try {
-    const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+    const child = spawn(cmd, args, { stdio: 'ignore', detached: true, shell: false, windowsHide: true });
     child.on('error', () => { /* no browser: the URL is printed anyway */ });
     child.unref();
     return true;
@@ -863,7 +872,7 @@ ${color.bold('Options')}
   -b, --branch <name>   production | development (overrides the linked branch)
   -d, --dir <path>      Migrations directory (default: migrations)
   -o, --out <file>      Output file for gen types
-      --url <url>       API base URL for login (default: https://api.nestcore.io)
+      --url <url>       API base URL for login (default: NESTCORE_API_URL, the last login, or https://api.nestcore.io)
       --code <code>     Two-factor code for login (or env NESTCORE_MFA_CODE)
   -h, --help            Show help
   -v, --version         Show version

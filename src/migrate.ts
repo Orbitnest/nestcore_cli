@@ -19,6 +19,22 @@ CREATE TABLE IF NOT EXISTS migrations (
   status TEXT NOT NULL
 );`;
 
+// The registry is internal bookkeeping: app users (anon/authenticated) must not
+// be able to read or rewrite it. Default privileges grant them DML on new public
+// tables, so lock it down after creating it. Best-effort: a registry owned by
+// another role (or a database without the NestCore roles) keeps working.
+const REGISTRY_HARDEN = [
+  'ALTER TABLE migrations ENABLE ROW LEVEL SECURITY',
+  'REVOKE ALL ON migrations FROM anon, authenticated',
+];
+
+async function ensureRegistry(sql: Sql): Promise<void> {
+  await sql(REGISTRY_DDL);
+  for (const stmt of REGISTRY_HARDEN) {
+    try { await sql(stmt); } catch { /* best-effort */ }
+  }
+}
+
 export interface MigFile {
   id: string;
   name: string;
@@ -95,7 +111,7 @@ export interface StatusEntry {
 }
 
 export async function status(sql: Sql, dir: string): Promise<StatusEntry[]> {
-  await sql(REGISTRY_DDL);
+  await ensureRegistry(sql);
   const files = scan(dir);
   const ap = await applied(sql);
   return files.map((f) => {
@@ -111,7 +127,7 @@ export async function status(sql: Sql, dir: string): Promise<StatusEntry[]> {
 }
 
 export async function push(sql: Sql, dir: string): Promise<{ ran: string[]; skipped: string[] }> {
-  await sql(REGISTRY_DDL);
+  await ensureRegistry(sql);
   const files = scan(dir);
   const ap = await applied(sql);
   const ran: string[] = [];
@@ -138,7 +154,7 @@ export async function push(sql: Sql, dir: string): Promise<{ ran: string[]; skip
 }
 
 export async function rollback(sql: Sql, dir: string, id?: string): Promise<string> {
-  await sql(REGISTRY_DDL);
+  await ensureRegistry(sql);
   const files = scan(dir);
   const ap = await applied(sql);
   let target: MigFile | undefined;

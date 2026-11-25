@@ -214,6 +214,8 @@ Raw SQL (`db sql`, `db push`/`status`/`rollback`/`reset`, `gen types`, `db diff`
 | `~/.nestcore/credentials.json` | global, `0600` | Access/refresh tokens, API URL, user. Shared with the NestCore MCP server; token refreshes are serialised through `~/.nestcore/credentials.lock`. |
 | `./.nestcore/config.json` | per-directory | Linked `projectId`, `projectSlug`, `name`, `apiUrl` and optional `branch` (same file the MCP server reads; older files with `slug` still work). Safe to commit. |
 
+The API the CLI talks to is `NESTCORE_API_URL`, else the URL you logged in to (`nestcore login --url`, stored in the credentials file), else `https://api.nestcore.io`. The `apiUrl` in `.nestcore/config.json` is never used as a destination, because a cloned repository could otherwise send your tokens and password to a host of its choosing. When it names a different API than your session, project commands stop with an error; sign in to that API with `nestcore login --url <url>` (or set `NESTCORE_API_URL`) if you trust it, or re-link the directory.
+
 Environment variables (override stored values):
 
 - `NESTCORE_API_URL` — API base URL.
